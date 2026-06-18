@@ -1,0 +1,12 @@
+# Generated pipeline artefacts
+/output/
+
+# Julia local / build artefacts
+/LocalPreferences.toml
+*.cov
+*.jl.*.cov
+*.jl.mem
+deps/deps.jl
+
+# OS cruft
+.DS_Store
