@@ -46,27 +46,27 @@ passed, in which case an image-space provisional plan is emitted instead.
 ──────────────────────────────────────────────────────────────────────────
 Scale extraction from a source geotransform
 ──────────────────────────────────────────────────────────────────────────
-`meters_per_pixel` is resolved (first match wins):
+Per-axis metres/px is resolved (first match wins):
 
-  1. `meters_per_pixel` set on the site  → used verbatim.
-  2. `geotiff` path set on the site       → read its GDAL geotransform and take
-     `geotransform_resolution` (hypot of the affine column/row axis vectors, so
-     rotation/skew are handled — not merely abs(dx)/abs(dy)).
-  3. `assume_durham_native_gsd = true`    → use the bundled Durham validation
-     ortho geotransform `GT_NATIVE` (≈0.02837 m/px) as the source GSD, scaled
-     by a screenshot/source correspondence factor (see below).
+  1. `meters_per_pixel` set on the site  → used verbatim (isotropic).
+  2. `geotiff` path set on the site       → read its GDAL geotransform via the
+     package's `read_band` and take `geotransform_resolution` (hypot of the
+     affine column/row axis vectors, so rotation/skew are handled — not merely
+     abs(dx)/abs(dy)), then scale each axis by its resample factor (below).
+  3. `assume_durham_native_gsd = true`    → (opt-in, default false) use the
+     bundled Durham validation ortho geotransform `GT_NATIVE` (≈0.02837 m/px)
+     as the source GSD × per-axis factor.
   4. otherwise                            → IMAGE-SPACE.
 
-**Assumption for (3):** each screenshot preserves the *source ortho pixel
-resolution* — i.e. one screenshot pixel == one source ortho pixel (no display
-rescaling / downsampling / cropping-with-rescale). When that does not hold,
-declare the correspondence in config with either:
-    source_px_per_screenshot_px = <f>      # 1 screenshot px == f source px
-or
-    source_crop_width_px  = <Wsrc>         # source-pixel width of the crop the
-    source_crop_height_px = <Hsrc>         #   screenshot depicts
-The effective GSD becomes `source_gsd * factor`, where `factor` is
-`source_px_per_screenshot_px` or `source_crop_width_px / screenshot_width_px`.
+**Anisotropic resample factors.** The screenshots are DISPLAY-RESAMPLED views
+of the source ortho, and the x/y factors generally differ (JPEG aspect ratio ≠
+source aspect ratio), so a single isotropic factor is wrong. Declare the source
+orthomosaic dimensions in config:
+    source_width_px  = <Wsrc>    # factor_x = source_width_px  / screenshot_W
+    source_height_px = <Hsrc>    # factor_y = source_height_px / screenshot_H
+The screenshot GSD is then `mpp_x = xres·factor_x`, `mpp_y = yres·factor_y`.
+(A legacy isotropic `source_px_per_screenshot_px` is honoured only when the
+`source_*_px` pair is absent.)
 
 Usage:
     julia --project=. scripts/preprocess_site_image.jl CONFIG.toml [options]
@@ -118,58 +118,67 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    resolve_meters_per_pixel(site, base_dir, W, H) -> (mpp, source, factor)
+    resolve_meters_per_pixel(site, base_dir, W, H)
+        -> (mpp_x, mpp_y, source, factor_x, factor_y)
 
-`mpp === nothing` ⇒ image-space (no reliable scale). Otherwise `mpp` is metres
-per screenshot-pixel and `source` documents where it came from.
+`mpp_x === nothing` ⇒ image-space (no reliable scale). Otherwise `mpp_x`/`mpp_y`
+are metres per screenshot-pixel along each axis and `source` documents where the
+scale came from.
+
+The screenshots are DISPLAY-RESAMPLED views of a source orthomosaic, and the
+x/y resample factors generally differ (the JPEG aspect ratio ≠ the source
+aspect ratio). We therefore keep the axes independent:
+
+    factor_x = source_width_px  / W        # source px per screenshot px, x
+    factor_y = source_height_px / H        # source px per screenshot px, y
+
+The source ground resolution comes from the source GeoTIFF's affine
+geotransform (`geotransform_resolution`, hypot of the axis vectors), so a
+screenshot pixel spans `xres * factor_x` metres in x and `yres * factor_y` in y.
 """
 function resolve_meters_per_pixel(site, base_dir, W::Int, H::Int)
-    # 1. Explicit
+    # Anisotropic source-px-per-screenshot-px factors. Prefer explicit source
+    # ortho dimensions (one per axis); fall back to a legacy isotropic factor.
+    sw = _get(site, "source_width_px")
+    sh = _get(site, "source_height_px")
+    spp = _get(site, "source_px_per_screenshot_px")
+    factor_x = sw !== nothing && Float64(sw) > 0 ? Float64(sw) / W :
+               (spp !== nothing && Float64(spp) > 0 ? Float64(spp) : 1.0)
+    factor_y = sh !== nothing && Float64(sh) > 0 ? Float64(sh) / H :
+               (spp !== nothing && Float64(spp) > 0 ? Float64(spp) : 1.0)
+
+    # 1. Explicit screenshot GSD (isotropic; overrides everything).
     mpp_explicit = _get(site, "meters_per_pixel")
     if mpp_explicit !== nothing && Float64(mpp_explicit) > 0
-        return Float64(mpp_explicit), "explicit meters_per_pixel", 1.0
+        m = Float64(mpp_explicit)
+        return m, m, "explicit meters_per_pixel", 1.0, 1.0
     end
 
-    # Correspondence factor (source px per screenshot px)
-    factor = let
-        crop_w = _get(site, "source_crop_width_px")
-        spp    = _get(site, "source_px_per_screenshot_px")
-        if crop_w !== nothing && Float64(crop_w) > 0
-            Float64(crop_w) / W
-        elseif spp !== nothing && Float64(spp) > 0
-            Float64(spp)
-        else
-            1.0
-        end
-    end
-
-    # 2. GeoTIFF geotransform (requires ArchGDAL in session)
+    # 2. Source GeoTIFF geotransform via the package's read_band (ArchGDAL).
     gtif = _resolve_path(base_dir, _get(site, "geotiff", ""))
     if !isempty(gtif) && isfile(gtif)
-        if isdefined(Main, :ArchGDAL)
-            gtvec = Main.ArchGDAL.read(gtif) do ds
-                Main.ArchGDAL.getgeotransform(ds)
-            end
-            xres, yres = geotransform_resolution(GeoTransform(gtvec))
-            return (xres + yres) / 2 * factor,
-                   "geotiff geotransform ($(basename(gtif))) × factor=$(round(factor; digits=4))",
-                   factor
-        else
-            @warn "geotiff set but ArchGDAL not loaded; cannot read GSD. Falling through." geotiff=gtif
-        end
+        _, gt, _ = read_band(gtif)                     # (Matrix, GeoTransform, crs)
+        xres, yres = geotransform_resolution(gt)       # metres / SOURCE pixel
+        return xres * factor_x, yres * factor_y,
+               "geotiff geotransform ($(basename(gtif))): src $(round(xres;digits=6))×$(round(yres;digits=6)) m/px × " *
+               "factor $(round(factor_x;digits=3))×$(round(factor_y;digits=3))",
+               factor_x, factor_y
     end
 
-    # 3. Assume Durham native ortho GSD
+    # 3. (Disabled by default) assume Durham native ortho GSD. Only fires if a
+    #    site explicitly opts in; the supplied screenshots set this false because
+    #    they are anisotropically resampled and need the real geotransform.
     if _get(site, "assume_durham_native_gsd", false) == true
         xres, yres = geotransform_resolution(GT_NATIVE)
-        base = (xres + yres) / 2
-        return base * factor,
-               "GT_NATIVE Durham GSD ($(round(base; digits=6)) m/px) × factor=$(round(factor; digits=4))",
-               factor
+        return xres * factor_x, yres * factor_y,
+               "GT_NATIVE Durham GSD ($(round(xres;digits=6))×$(round(yres;digits=6)) m/px) × " *
+               "factor $(round(factor_x;digits=3))×$(round(factor_y;digits=3))  [ASSUMED]",
+               factor_x, factor_y
     end
 
-    # 4. Image-space
-    return nothing, "image-space (no CRS/GSD supplied)", factor
+    # 4. Image-space (no scale). Metric column (c) refused unless --preview.
+    return nothing, nothing, "image-space (no CRS/GSD; supply `geotiff` for metric mode)",
+           factor_x, factor_y
 end
 
 # ---------------------------------------------------------------------------
@@ -246,16 +255,18 @@ function process_site(site, base_dir::AbstractString, outroot::AbstractString;
     println("  dims  = $(W)×$(H) px (W×H)")
 
     # --- Resolve metric scale ----------------------------------------------
-    mpp, mpp_source, factor = resolve_meters_per_pixel(site, base_dir, W, H)
-    metric = mpp !== nothing
-    println("  scale = ", metric ? "$(round(mpp; digits=6)) m/px  [$mpp_source]" :
-                                    "IMAGE-SPACE  [$mpp_source]")
+    mpp_x, mpp_y, mpp_source, factor_x, factor_y =
+        resolve_meters_per_pixel(site, base_dir, W, H)
+    metric = mpp_x !== nothing
+    println("  scale = ", metric ?
+        "$(round(mpp_x; digits=6))×$(round(mpp_y; digits=6)) m/px  [$mpp_source]" :
+        "IMAGE-SPACE  [$mpp_source]")
 
     # World extents for the RasterGrid axes:
-    #   metric      → metres (xmax = W*mpp, ymax = H*mpp) so spacing_m is honoured
-    #   image-space → pixels  (xmax = W,     ymax = H)     (spacing means pixels)
-    xmax = metric ? W * mpp : Float64(W)
-    ymax = metric ? H * mpp : Float64(H)
+    #   metric      → metres (xmax = W*mpp_x, ymax = H*mpp_y) so spacing_m honoured
+    #   image-space → pixels  (xmax = W,       ymax = H)       (spacing = pixels)
+    xmax = metric ? W * mpp_x : Float64(W)
+    ymax = metric ? H * mpp_y : Float64(H)
 
     # --- Params -------------------------------------------------------------
     seed        = Int(_get(site, "seed", defaults.seed))
@@ -375,9 +386,11 @@ function process_site(site, base_dir::AbstractString, outroot::AbstractString;
         "image_width_px"       => W,
         "image_height_px"      => H,
         "mode"                 => metric ? "metric" : "image-space",
-        "meters_per_pixel"     => metric ? mpp : nothing,
+        "meters_per_pixel_x"   => metric ? mpp_x : nothing,
+        "meters_per_pixel_y"   => metric ? mpp_y : nothing,
         "scale_source"         => mpp_source,
-        "source_screenshot_factor" => factor,
+        "source_screenshot_factor_x" => factor_x,
+        "source_screenshot_factor_y" => factor_y,
         "chosen_k"             => k,
         "tree_labels_used"     => tree_labels,
         "tree_labels_reviewed" => false,

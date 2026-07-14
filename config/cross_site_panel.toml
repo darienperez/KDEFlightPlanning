@@ -55,17 +55,21 @@ col_c_speedcol = "Speed"
 provisional    = false
 
 # ── Row 2: OxBow Farm ───────────────────────────────────────────────────────
-# Non-georeferenced JPEG screenshot (1328×1080). No surveyed CRS/GSD supplied.
-# `assume_durham_native_gsd = true` borrows the Durham validation ortho GSD
-# (GT_NATIVE, ≈0.02837 m/px) as an ASSUMED relative-metric scale — see the
-# guide for the "one screenshot px == one source ortho px" assumption. The
-# resulting column (c) is RELATIVE-METRIC with UNREVIEWED vegetation labels;
-# it is NOT a surveyed, publication-ready 40 m plan → provisional = true.
+# Non-georeferenced JPEG screenshot (1328×1080). No CRS/GSD in the JPEG.
+# The JPEG is a DISPLAY-RESAMPLED view of a source orthomosaic that is
+# 11427×9281 px (W×H). The x and y resample factors DIFFER
+# (11427/1328 ≈ 8.60 vs 9281/1080 ≈ 8.59), so a single isotropic factor is
+# wrong — `source_width_px`/`source_height_px` expose both axes independently.
+# METRIC PROCESSING IS DISABLED until the source GeoTIFF geotransform is
+# supplied via `geotiff` (extract/verify it with scripts/inspect_geotiff.jl).
+# Until then the row stays image-space / provisional = true.
 [[site]]
 name                     = "OxBow Farm"
 image                    = "../data/site_images/oxbow_farm.jpg"
-assume_durham_native_gsd = true
-source_px_per_screenshot_px = 1.0   # ← declare cropping/rescale here if known
+geotiff                  = ""        # ← set to the source ortho .tif to enable metric mode
+source_width_px          = 11427     # source orthomosaic width  (px)
+source_height_px         = 9281      # source orthomosaic height (px)
+assume_durham_native_gsd = false     # disabled: JPEG is display-resampled (anisotropic)
 tree_labels              = [1]      # ← REVIEW cluster_overlay_k*.png, then set
 col_a                    = "../data/site_images/oxbow_farm.jpg"
 col_a_overlay            = "../output/oxbow_farm/cluster/cluster_overlay_k1.png"
@@ -77,11 +81,16 @@ col_c_speedcol           = "speed"
 provisional              = true
 
 # ── Row 3: Hubbard Brook ─────────────────────────────────────────────────────
+# Screenshot 1212×1080; source ortho 12609×9811 px (W×H). Resample factors are
+# strongly anisotropic (12609/1212 ≈ 10.40 vs 9811/1080 ≈ 9.08). Metric mode
+# disabled until `geotiff` is provided.
 [[site]]
 name                     = "Hubbard Brook"
 image                    = "../data/site_images/hubbard_brook.jpg"
-assume_durham_native_gsd = true
-source_px_per_screenshot_px = 1.0
+geotiff                  = ""
+source_width_px          = 12609
+source_height_px         = 9811
+assume_durham_native_gsd = false
 tree_labels              = [1]
 col_a                    = "../data/site_images/hubbard_brook.jpg"
 col_a_overlay            = "../output/hubbard_brook/cluster/cluster_overlay_k1.png"
@@ -93,11 +102,16 @@ col_c_speedcol           = "speed"
 provisional              = true
 
 # ── Row 4: Kingman Farm ──────────────────────────────────────────────────────
+# Screenshot 1390×1080; source ortho 9916×8859 px (W×H). Resample factors are
+# anisotropic (9916/1390 ≈ 7.13 vs 8859/1080 ≈ 8.20). Metric mode disabled
+# until `geotiff` is provided.
 [[site]]
 name                     = "Kingman Farm"
 image                    = "../data/site_images/kingman_farm.jpg"
-assume_durham_native_gsd = true
-source_px_per_screenshot_px = 1.0
+geotiff                  = ""
+source_width_px          = 9916
+source_height_px         = 8859
+assume_durham_native_gsd = false
 tree_labels              = [1]
 col_a                    = "../data/site_images/kingman_farm.jpg"
 col_a_overlay            = "../output/kingman_farm/cluster/cluster_overlay_k1.png"
