@@ -95,13 +95,15 @@ const COLUMN_HEADERS = [
 # ---------------------------------------------------------------------------
 
 struct SiteSpec
-    name        :: String
-    col_a       :: String
-    col_b       :: String
-    col_c       :: String
-    c_xcol      :: String
-    c_ycol      :: String
-    c_speedcol  :: String
+    name         :: String
+    col_a        :: String
+    col_a_overlay:: String
+    col_b        :: String
+    col_c        :: String
+    c_xcol       :: String
+    c_ycol       :: String
+    c_speedcol   :: String
+    provisional  :: Bool
 end
 
 struct PanelConfig
@@ -127,11 +129,13 @@ function load_panel_config(path::AbstractString)::PanelConfig
         push!(sites, SiteSpec(
             String(get(s, "name", "(unnamed site)")),
             _resolve(base, get(s, "col_a", "")),
+            _resolve(base, get(s, "col_a_overlay", "")),
             _resolve(base, get(s, "col_b", "")),
             _resolve(base, get(s, "col_c", "")),
             String(get(s, "col_c_xcol",     "GridX")),
             String(get(s, "col_c_ycol",     "GridY")),
             String(get(s, "col_c_speedcol", "Speed")),
+            Bool(get(s, "provisional", false)),
         ))
     end
 
@@ -176,6 +180,23 @@ function _placeholder!(fig, cell, label::AbstractString)
     xlims!(ax, 0, 1); ylims!(ax, 0, 1)
     text!(ax, 0.5, 0.5; text = label, align = (:center, :center),
           fontsize = 11, color = COL_L1)
+    return ax
+end
+
+"""
+    _provisional_stamp!(fig, cell) — overlay a "PROVISIONAL" ribbon on a cell
+    whose waypoint plan is NOT a surveyed metric plan (image-space or assumed
+    GSD from a non-georeferenced screenshot). Keeps the figure honest about
+    scale so no reader mistakes it for a 40 m-spaced, publication-ready plan.
+"""
+function _provisional_stamp!(fig, cell)
+    ax = Axis(fig[cell...]; backgroundcolor = :transparent)
+    hidedecorations!(ax); hidespines!(ax)
+    xlims!(ax, 0, 1); ylims!(ax, 0, 1)
+    text!(ax, 0.5, 0.06;
+          text = "PROVISIONAL — image-space / assumed GSD (not surveyed metric)",
+          align = (:center, :center), fontsize = 9,
+          color = (:red, 0.9), font = :bold)
     return ax
 end
 
@@ -272,22 +293,35 @@ end
     else `nothing`.
 """
 function _render_cell!(fig, cell, col::Int, site::SiteSpec, cfg::PanelConfig)
-    path = col == 1 ? site.col_a : col == 2 ? site.col_b : site.col_c
+    # Column (a) prefers a rendered k-medoids overlay when it exists, else the
+    # raw screenshot / pipeline PNG.
+    path = if col == 1
+        (!isempty(site.col_a_overlay) && isfile(site.col_a_overlay)) ?
+            site.col_a_overlay : site.col_a
+    elseif col == 2
+        site.col_b
+    else
+        site.col_c
+    end
     tag  = ("a", "b", "c")[col]
 
     if isempty(path) || !isfile(path)
         _placeholder!(fig, cell,
             "$(site.name)\n($tag) pending — add path in config")
+        col == 3 && site.provisional && _provisional_stamp!(fig, cell)
         return nothing
     end
 
     try
         if col == 3
+            sc = nothing
             if _is_csv(path)
-                return _render_waypoints!(fig, cell, site, cfg)
+                sc = _render_waypoints!(fig, cell, site, cfg)
             else                      # fallback image for column (c)
-                _render_image!(fig, cell, path); return nothing
+                _render_image!(fig, cell, path)
             end
+            site.provisional && _provisional_stamp!(fig, cell)
+            return sc
         elseif col == 2
             if _is_geotiff(path)
                 ax = _render_geotiff_kde!(fig, cell, path, cfg.kde_colormap)

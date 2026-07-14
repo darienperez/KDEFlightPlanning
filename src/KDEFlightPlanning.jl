@@ -316,7 +316,7 @@ export build_density_surface, run_pipeline
 export build_mask_from_image, build_mask_autok
 export build_mask_from_image_strided
 export run_full_pipeline
-export axes_from_geotransform, pixel_axes
+export axes_from_geotransform, geotransform_resolution, pixel_axes
 export load_rgb_georef
 
 # --- Trajectory analysis ---

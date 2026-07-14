@@ -55,6 +55,42 @@ function axes_from_geotransform(gt::AbstractVector, W::Integer, H::Integer)
     return xs, ys
 end
 
+"""
+    geotransform_resolution(gt) -> (xres, yres)
+
+Extract the ground sampling distance (metres per pixel) along each pixel axis
+from a 6-term GDAL affine geotransform, robust to rotation/skew.
+
+The GDAL geotransform maps pixel `(col, row)` (0-based) to world `(X, Y)`:
+
+    X = gt[1] + col·gt[2] + row·gt[3]
+    Y = gt[4] + col·gt[5] + row·gt[6]
+
+(Here `gt` is the package's 1-based `GeoTransform`/vector: `gt[1]=x_origin`,
+`gt[2]=dx`, `gt[3]=x_rot`, `gt[4]=y_origin`, `gt[5]=y_rot`, `gt[6]=dy`, which
+is GDAL 0-based `GT[0..5]` shifted by one.)
+
+Stepping one column advances world position by `(gt[2], gt[5])`; stepping one
+row advances by `(gt[3], gt[6])`. The physical pixel size along each axis is
+therefore the Euclidean length of these column/row axis vectors:
+
+    xres = hypot(gt[2], gt[5])   # length of the per-column axis vector
+    yres = hypot(gt[3], gt[6])   # length of the per-row axis vector
+
+Using `hypot` (rather than `abs(gt[2])` / `abs(gt[6])`) means rotated or
+skewed geotransforms return the true on-ground spacing, not just the axis-
+aligned component. For a north-up transform (`gt[3]=gt[5]=0`) this reduces to
+`(abs(gt[2]), abs(gt[6]))`.
+
+Accepts a `GeoTransform`, or any indexable length-≥6 vector.
+"""
+function geotransform_resolution(gt)
+    length(gt) >= 6 || throw(ArgumentError("gt must have ≥ 6 elements (GDAL geotransform)"))
+    xres = hypot(Float64(gt[2]), Float64(gt[5]))
+    yres = hypot(Float64(gt[3]), Float64(gt[6]))
+    return xres, yres
+end
+
 # ---------------------------------------------------------------------------
 # Uniform pixel-space axes (for image-array workflows)
 # ---------------------------------------------------------------------------

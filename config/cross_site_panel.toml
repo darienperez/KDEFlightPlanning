@@ -1,35 +1,49 @@
 # Cross-site planning-stage panel config — cross_site_planning_panel.png
 #
-# Consumed by scripts/make_cross_site_panel.jl. Paths are resolved relative to
-# THIS file's directory (config/), matching config/run_durham.toml.
+# Consumed by TWO scripts:
+#   • scripts/preprocess_site_image.jl  — runs the k-medoids → KDE →
+#     2–8 m/s → boustrophedon pipeline on each site's `image` and writes the
+#     column (a)/(b)/(c) artefacts under output/<slug>/.
+#   • scripts/make_cross_site_panel.jl  — composes the 4×3 figure from the
+#     per-site col_* paths below.
 #
-# Each [[site]] becomes one row; the three columns are:
-#   (a) col_a — RGB orthomosaic with k-medoids vegetation-cluster overlay
-#               → an image PNG/JPG (a screenshot, or a pre-rendered
-#                 output/<site>/cluster/cluster_overlay_k*.png from the pipeline)
-#   (b) col_b — Epanechnikov KDE normalised planning surface
-#               → an image PNG/JPG (output/<site>/kde/kde_density_heatmap.png),
-#                 a co-registered .tif KDE surface (needs ArchGDAL), OR a
-#                 headerless CSV grid of [0,1] density values
-#   (c) col_c — boustrophedon waypoint plan coloured by 2–8 m/s target speed
-#               → a waypoint CSV with x / y / speed columns (see col_c_*cols),
-#                 OR a fallback image
+# Paths are resolved relative to THIS file's directory (config/), matching
+# config/run_durham.toml.
+#
+# Columns:
+#   (a) col_a         — RGB screenshot (raw). If col_a_overlay is set AND the
+#                       file exists, the k-medoids vegetation-cluster overlay is
+#                       shown instead of the raw screenshot.
+#   (b) col_b         — Epanechnikov KDE normalised planning surface (PNG, a
+#                       headerless CSV grid, or a co-registered .tif).
+#   (c) col_c         — boustrophedon waypoints coloured by 2–8 m/s target speed
+#                       (a waypoint CSV with x/y/speed columns, or a fallback
+#                       image). Set `provisional = true` to stamp the cell as
+#                       image-space / not surveyed-metric.
 #
 # Leave any col_* = "" (or point at a missing file) to get a clearly-marked
-# "pending" placeholder cell — the figure still composes so you can drop in
-# Site B/C/D screenshots incrementally.
+# "pending" placeholder cell so the figure still composes incrementally.
 
 speed_min      = 2.0        # shared colorbar lower bound (m/s)
 speed_max      = 8.0        # shared colorbar upper bound (m/s)
 speed_colormap = "cividis"  # matches src/reports.jl report_speed_map
 kde_colormap   = "viridis"  # matches src/reports.jl report_kde_density
 
+# ── Shared preprocessing defaults (used by preprocess_site_image.jl) ────────
+# Override any of these per-[[site]].
+seed                   = 6213
+nsample                = 2000
+kmedoids_k_range       = [2, 8]
+tree_labels            = [1]     # DEFAULT ONLY — review per site (snow/illum!)
+track_spacing_m        = 40.0    # metric flight-line spacing (metric mode only)
+min_waypoint_spacing_m = 10.0
+max_waypoint_spacing_m = 30.0
+
 # ── Row 1: Durham, NH (primary study site) ─────────────────────────────────
 # Column (c) uses the REAL bundled density-aware waypoints (GridX,GridY,Height,
-# Speed). Columns (a)/(b) point at pipeline outputs — run
-#   julia --project=. scripts/run_pipeline.jl config/run_durham.toml
-# to generate them (they render as placeholders until then, since the
-# full-resolution Durham ortho is not bundled).
+# Speed) — a genuine metric plan. Columns (a)/(b) point at pipeline outputs;
+# run  julia --project=. scripts/run_pipeline.jl config/run_durham.toml  to
+# generate them (they render as placeholders until then).
 [[site]]
 name           = "Durham, NH"
 col_a          = "../output/durham/cluster/cluster_overlay_k1.png"
@@ -38,24 +52,58 @@ col_c          = "../data/ground_truth/E_density_aware__waypoints_xy.csv"
 col_c_xcol     = "GridX"
 col_c_ycol     = "GridY"
 col_c_speedcol = "Speed"
+provisional    = false
 
-# ── Row 2: Site B (PLACEHOLDER — point at your uploaded screenshots) ────────
+# ── Row 2: OxBow Farm ───────────────────────────────────────────────────────
+# Non-georeferenced JPEG screenshot (1328×1080). No surveyed CRS/GSD supplied.
+# `assume_durham_native_gsd = true` borrows the Durham validation ortho GSD
+# (GT_NATIVE, ≈0.02837 m/px) as an ASSUMED relative-metric scale — see the
+# guide for the "one screenshot px == one source ortho px" assumption. The
+# resulting column (c) is RELATIVE-METRIC with UNREVIEWED vegetation labels;
+# it is NOT a surveyed, publication-ready 40 m plan → provisional = true.
 [[site]]
-name  = "Site B"
-col_a = ""   # e.g. "../data/site_b/rgb_kmedoids_overlay.png"
-col_b = ""   # e.g. "../data/site_b/kde_surface.png"
-col_c = ""   # e.g. "../data/site_b/waypoints_xy_speed.csv" (x,y,speed cols)
+name                     = "OxBow Farm"
+image                    = "../data/site_images/oxbow_farm.jpg"
+assume_durham_native_gsd = true
+source_px_per_screenshot_px = 1.0   # ← declare cropping/rescale here if known
+tree_labels              = [1]      # ← REVIEW cluster_overlay_k*.png, then set
+col_a                    = "../data/site_images/oxbow_farm.jpg"
+col_a_overlay            = "../output/oxbow_farm/cluster/cluster_overlay_k1.png"
+col_b                    = "../output/oxbow_farm/kde/kde_density_heatmap.png"
+col_c                    = "../output/oxbow_farm/waypoints/oxbow_farm_waypoints_xy_speed.csv"
+col_c_xcol               = "x"
+col_c_ycol               = "y"
+col_c_speedcol           = "speed"
+provisional              = true
 
-# ── Row 3: Site C (PLACEHOLDER) ─────────────────────────────────────────────
+# ── Row 3: Hubbard Brook ─────────────────────────────────────────────────────
 [[site]]
-name  = "Site C"
-col_a = ""
-col_b = ""
-col_c = ""
+name                     = "Hubbard Brook"
+image                    = "../data/site_images/hubbard_brook.jpg"
+assume_durham_native_gsd = true
+source_px_per_screenshot_px = 1.0
+tree_labels              = [1]
+col_a                    = "../data/site_images/hubbard_brook.jpg"
+col_a_overlay            = "../output/hubbard_brook/cluster/cluster_overlay_k1.png"
+col_b                    = "../output/hubbard_brook/kde/kde_density_heatmap.png"
+col_c                    = "../output/hubbard_brook/waypoints/hubbard_brook_waypoints_xy_speed.csv"
+col_c_xcol               = "x"
+col_c_ycol               = "y"
+col_c_speedcol           = "speed"
+provisional              = true
 
-# ── Row 4: Site D (PLACEHOLDER) ─────────────────────────────────────────────
+# ── Row 4: Kingman Farm ──────────────────────────────────────────────────────
 [[site]]
-name  = "Site D"
-col_a = ""
-col_b = ""
-col_c = ""
+name                     = "Kingman Farm"
+image                    = "../data/site_images/kingman_farm.jpg"
+assume_durham_native_gsd = true
+source_px_per_screenshot_px = 1.0
+tree_labels              = [1]
+col_a                    = "../data/site_images/kingman_farm.jpg"
+col_a_overlay            = "../output/kingman_farm/cluster/cluster_overlay_k1.png"
+col_b                    = "../output/kingman_farm/kde/kde_density_heatmap.png"
+col_c                    = "../output/kingman_farm/waypoints/kingman_farm_waypoints_xy_speed.csv"
+col_c_xcol               = "x"
+col_c_ycol               = "y"
+col_c_speedcol           = "speed"
+provisional              = true
