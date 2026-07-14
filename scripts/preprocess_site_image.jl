@@ -81,6 +81,25 @@ Options:
                   scale is available. Without it, image-space sites emit (a)/(b)
                   only and column (c) is skipped with a warning.
     --outroot DIR Root output directory (default: <repo>/output).
+
+──────────────────────────────────────────────────────────────────────────
+Vegetation cluster labels (`tree_labels`) — interactive first run, then reproducible
+──────────────────────────────────────────────────────────────────────────
+There is NO silent `tree_labels = [1]` default. The vegetation cluster id(s)
+are resolved per-site, AFTER clustering + overlay rendering, as follows:
+
+  • `tree_labels` present & valid in the site's [[site]] block → used verbatim,
+    no prompt (fully reproducible; CI/batch safe).
+  • absent/empty AND stdin is an interactive TTY → the per-cluster overlays are
+    previewed and you are prompted to enter the vegetation cluster id(s) in 1:k
+    (reprompting until valid). The confirmed ids are PERSISTED back into the
+    matching [[site]] block of the SAME config (line-preserving, atomic; comments
+    and ordering are kept), so the next run of that site is non-interactive.
+  • absent/empty AND stdin is NOT a TTY → hard error with actionable steps (add
+    `tree_labels` or rerun interactively). It will NOT guess `[1]`/greenest.
+
+So the intended workflow is: run once interactively to review + lock in labels
+(written to the config), then all subsequent runs are reproducible.
 """
 
 using Pkg
@@ -97,6 +116,11 @@ using Statistics
 using TOML
 
 import KDEFlightPlanning: geotransform_resolution, GT_NATIVE
+
+# Pure helpers for the interactive vegetation-label workflow (parse / validate /
+# prompt / line-preserving TOML persistence). Kept in a separate, dependency-light
+# file so they can be unit-tested without loading CairoMakie / KDEFlightPlanning.
+include(joinpath(@__DIR__, "tree_label_selection.jl"))
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -227,11 +251,65 @@ function render_cluster_overlays(img::AbstractMatrix{<:Colorant},
 end
 
 # ---------------------------------------------------------------------------
+# Vegetation cluster-label resolution (NO silent default)
+# ---------------------------------------------------------------------------
+
+"""
+    resolve_site_tree_labels(cfg_labels, k, overlay_paths; name, suggested,
+                             config_path) -> (labels::Vector{Int}, source::String, persisted::Bool)
+
+Decide the vegetation cluster label set for a site AFTER clustering + overlay
+rendering, with NO silent `[1]`/greenest fallback:
+
+  • `cfg_labels` valid & nonempty  → use as-is (validated against `1:k`);
+    source = "config", persisted = false (already in the config).
+  • absent/empty + interactive TTY → preview overlays and prompt (reprompting on
+    invalid input), then persist the choice into the site's config block;
+    source = "interactive".
+  • absent/empty + non-TTY         → error with actionable instructions.
+"""
+function resolve_site_tree_labels(cfg_labels, k::Int,
+                                  overlay_paths::AbstractVector{<:AbstractString};
+                                  name::AbstractString, suggested::Int,
+                                  config_path::AbstractString)
+    if cfg_labels !== nothing
+        err = validate_configured_tree_labels(cfg_labels, k)
+        err === nothing || error(
+            "Configured tree_labels for site \"$name\" are invalid: $err.\n" *
+            "Fix the `tree_labels` entry in the config (valid cluster ids are 1:$k), " *
+            "or remove it to select interactively.")
+        return sort(unique(Int.(cfg_labels))), "config", false
+    end
+
+    if !isatty(stdin)
+        error(
+            "No `tree_labels` configured for site \"$name\" and stdin is not a TTY.\n" *
+            "This cross-site preprocessing path will NOT guess a vegetation cluster.\n" *
+            "Do one of:\n" *
+            "  1. Add `tree_labels = [..]` (cluster ids in 1:$k) to the site's [[site]] " *
+            "block in the config, then rerun; or\n" *
+            "  2. Rerun in an interactive terminal to review the cluster overlays and " *
+            "select the vegetation cluster(s). Overlays written to:\n" *
+            join(("       " * p for p in overlay_paths), "\n"))
+    end
+
+    labels = prompt_tree_labels(k, overlay_paths; name = name, suggested = suggested)
+    ok, msg = persist_tree_labels(config_path, name, labels)
+    if ok
+        @info "Persisted selected tree_labels into config" site=name labels=labels config=config_path
+    else
+        @warn "Could not persist tree_labels to config; using them for THIS run only. " *
+              "Add them manually to avoid re-prompting." site=name labels=labels reason=msg
+    end
+    return labels, "interactive", ok
+end
+
+# ---------------------------------------------------------------------------
 # Per-site processing
 # ---------------------------------------------------------------------------
 
 function process_site(site, base_dir::AbstractString, outroot::AbstractString;
-                      preview::Bool, defaults)
+                      preview::Bool, defaults, config_path::AbstractString)
     name  = String(_get(site, "name", "(unnamed)"))
     image = _resolve_path(base_dir, _get(site, "image", ""))
     if isempty(image) || !isfile(image)
@@ -273,13 +351,19 @@ function process_site(site, base_dir::AbstractString, outroot::AbstractString;
     nsample     = Int(_get(site, "nsample", defaults.nsample))
     kr          = _get(site, "kmedoids_k_range", defaults.k_range)
     ks          = Int(kr[1]):Int(kr[2])
-    tree_labels = Int.(_get(site, "tree_labels", defaults.tree_labels))
     vmin, vmax  = Float64(defaults.speed_bounds[1]), Float64(defaults.speed_bounds[2])
 
-    # --- (a) k-medoids mask (auto-k sweep) ---------------------------------
-    println("  [a] k-medoids CIELAB clustering (ks=$(ks), tree_labels=$(tree_labels)) …")
-    mask_grid, info = build_mask_from_image(img;
-        tree_labels = tree_labels, seed = seed, nsample = nsample,
+    # Vegetation labels come ONLY from this site's block — no silent [1] default.
+    # `nothing` here means absent/empty → resolved interactively (TTY) or errors.
+    cfg_labels  = site_configured_tree_labels(site)
+
+    # --- (a) k-medoids clustering (labels are independent of tree_labels) ---
+    # Cluster first with an empty selection to obtain labels_full + chosen k and
+    # render the per-cluster overlays; the vegetation label set is decided AFTER
+    # the overlays exist so the user can review them.
+    println("  [a] k-medoids CIELAB clustering (ks=$(ks)) …")
+    _, info = build_mask_from_image(img;
+        tree_labels = Int[], seed = seed, nsample = nsample,
         ks = ks, k_strategy = :vote,
         xmin = 0.0, xmax = xmax, ymin = 0.0, ymax = ymax)
     k = info.k
@@ -291,33 +375,51 @@ function process_site(site, base_dir::AbstractString, outroot::AbstractString;
     greenness = [ -mean(@view(a_chan[label_img .== cid])) for cid in 1:k ]
     suggested = argmax(greenness)
 
-    render_cluster_overlays(img, label_img, k,
+    overlay_paths = render_cluster_overlays(img, label_img, k,
                             joinpath(outdir, "cluster"); greenness = greenness)
+    println("      suggested vegetation cluster (hint only): k=$suggested")
 
-    # Honest tree-label decision record (never treated as ground truth).
+    # --- Resolve vegetation labels (config → interactive prompt → error) ----
+    tree_labels, label_source, label_persisted = resolve_site_tree_labels(
+        cfg_labels, k, overlay_paths;
+        name = name, suggested = suggested, config_path = config_path)
+    tree_labels_reviewed = label_source in ("config", "interactive")
+    println("      tree_labels = $tree_labels  [source=$label_source",
+            label_source == "interactive" ? (label_persisted ? ", persisted" : ", NOT persisted") : "", "]")
+
+    # Rebuild the vegetation mask from the confirmed labels (reusing the same
+    # clustering + world axes) so KDE/speed/waypoints reflect the final choice.
+    veg = labels_to_mask(info.labels_full, H, W; tree_labels = tree_labels)
+    mask_grid = RasterGrid(Float64.(veg), info.xs, info.ys)
+
+    # Tree-label decision record (now reflects the confirmed selection).
     open(joinpath(outdir, "cluster", "tree_label_decision.md"), "w") do io
         println(io, "# Tree-label decision — $name")
         println(io)
-        println(io, "Chosen k = **$k**. `tree_labels` currently set to ",
-                    "`$(tree_labels)` (from config / default).")
+        println(io, "Chosen k = **$k**. `tree_labels` = `$(tree_labels)` ",
+                    "(source: **$label_source**",
+                    label_source == "interactive" ?
+                        (label_persisted ? ", persisted to config)." : ", NOT persisted — add manually).") :
+                        ").")
         println(io)
-        println(io, "> ⚠️  These labels are **NOT reviewed ground truth**. Snow and ",
-                    "strong illumination in these winter screenshots make automatic ",
-                    "vegetation-cluster identification unreliable. Inspect ",
-                    "`cluster_overlay_k*.png` and set the correct cluster id(s) in the ",
-                    "site's `tree_labels` before using this site for anything metric.")
+        if label_source == "config"
+            println(io, "> These labels were supplied explicitly in the site's config block ",
+                        "and used without prompting.")
+        else
+            println(io, "> These labels were confirmed interactively after reviewing the ",
+                        "`cluster_overlay_k*.png` overlays.")
+        end
         println(io)
         println(io, "Per-cluster candidate greenness (−mean CIELAB a*, higher = greener):")
         println(io)
         println(io, "| cluster | greenness | note |")
         println(io, "|---|---|---|")
         for cid in 1:k
-            note = cid == suggested ? "← greenest (suggestion only)" :
-                   (cid in tree_labels ? "← currently in tree_labels" : "")
+            note = cid in tree_labels ? "← selected (vegetation)" :
+                   (cid == suggested ? "← greenest (hint only)" : "")
             println(io, "| $cid | $(round(greenness[cid]; digits=3)) | $note |")
         end
     end
-    println("      suggested vegetation cluster (review!): k=$suggested")
 
     # --- (b) Epanechnikov KDE planning surface -----------------------------
     println("  [b] Epanechnikov KDE planning surface …")
@@ -393,14 +495,16 @@ function process_site(site, base_dir::AbstractString, outroot::AbstractString;
         "source_screenshot_factor_y" => factor_y,
         "chosen_k"             => k,
         "tree_labels_used"     => tree_labels,
-        "tree_labels_reviewed" => false,
+        "tree_labels_reviewed" => tree_labels_reviewed,
+        "tree_labels_source"   => label_source,
+        "tree_labels_persisted"=> label_persisted,
         "suggested_veg_cluster"=> suggested,
         "speed_bounds_mps"     => [vmin, vmax],
         "column_c"             => wrote_c ? (metric ? "metric" : "image-space-provisional") : "skipped",
         "column_c_spacing_units" => metric ? "m" : (wrote_c ? "px" : nothing),
         "waypoints_csv"        => wrote_c ? wp_csv : nothing,
         "warning"              => metric ?
-            "Vegetation cluster labels are unreviewed; verify tree_labels before publication." :
+            "Vegetation cluster labels were $(label_source == "config" ? "supplied in config" : "confirmed interactively"); verify tree_labels before publication." :
             "IMAGE-SPACE: no CRS/GSD. Columns (a)/(b) normalised; column (c) provisional (pixels, not metres). Not publication-ready.",
     )
     open(joinpath(outdir, "site_provenance.json"), "w") do io
@@ -447,7 +551,6 @@ function main()
         seed          = Int(get(raw, "seed", 6213)),
         nsample       = Int(get(raw, "nsample", 2000)),
         k_range       = get(raw, "kmedoids_k_range", [2, 8]),
-        tree_labels   = Int.(get(raw, "tree_labels", [1])),
         speed_bounds  = (Float64(get(raw, "speed_min", 2.0)), Float64(get(raw, "speed_max", 8.0))),
         track_spacing_m = Float64(get(raw, "track_spacing_m", 40.0)),
         min_wp_m      = Float64(get(raw, "min_waypoint_spacing_m", 10.0)),
@@ -465,7 +568,8 @@ function main()
     for s in sites
         site_filter !== nothing && String(get(s, "name", "")) != site_filter && continue
         haskey(s, "image") || continue
-        process_site(s, base, outroot; preview = preview, defaults = defaults)
+        process_site(s, base, outroot; preview = preview, defaults = defaults,
+                     config_path = config_path)
         processed += 1
     end
     println("\n[preprocess] done — processed $processed site(s).")

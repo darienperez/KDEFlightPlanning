@@ -31,10 +31,18 @@ kde_colormap   = "viridis"  # matches src/reports.jl report_kde_density
 
 # ── Shared preprocessing defaults (used by preprocess_site_image.jl) ────────
 # Override any of these per-[[site]].
+#
+# NOTE: there is deliberately NO shared `tree_labels` default. The vegetation
+# cluster id(s) must be reviewed per site against that site's own cluster
+# overlays (snow / illumination / crop colour differ between sites, so a global
+# default is unsafe). Each [[site]] resolves `tree_labels` on its own:
+#   • set `tree_labels = [..]` in the site block  → used verbatim (reproducible);
+#   • omit it and run interactively               → you review the overlays, pick
+#     the vegetation cluster(s), and the choice is written back into that block;
+#   • omit it and run non-interactively           → hard error (never guesses).
 seed                   = 6213
 nsample                = 2000
 kmedoids_k_range       = [2, 8]
-tree_labels            = [1]     # DEFAULT ONLY — review per site (snow/illum!)
 track_spacing_m        = 40.0    # metric flight-line spacing (metric mode only)
 min_waypoint_spacing_m = 10.0
 max_waypoint_spacing_m = 30.0
@@ -70,7 +78,9 @@ geotiff                  = ""        # ← set to the source ortho .tif to enabl
 source_width_px          = 11427     # source orthomosaic width  (px)
 source_height_px         = 9281      # source orthomosaic height (px)
 assume_durham_native_gsd = false     # disabled: JPEG is display-resampled (anisotropic)
-tree_labels              = [1]      # ← REVIEW cluster_overlay_k*.png, then set
+# tree_labels intentionally omitted — run preprocess_site_image.jl interactively
+# once to review cluster_overlay_k*.png and select the vegetation cluster(s); the
+# script writes the confirmed `tree_labels = [..]` back into this block.
 col_a                    = "../data/site_images/oxbow_farm.jpg"
 col_a_overlay            = "../output/oxbow_farm/cluster/cluster_overlay_k1.png"
 col_b                    = "../output/oxbow_farm/kde/kde_density_heatmap.png"
@@ -91,7 +101,7 @@ geotiff                  = ""
 source_width_px          = 12609
 source_height_px         = 9811
 assume_durham_native_gsd = false
-tree_labels              = [1]
+# tree_labels intentionally omitted — select interactively on first run (see above).
 col_a                    = "../data/site_images/hubbard_brook.jpg"
 col_a_overlay            = "../output/hubbard_brook/cluster/cluster_overlay_k1.png"
 col_b                    = "../output/hubbard_brook/kde/kde_density_heatmap.png"
@@ -112,7 +122,7 @@ geotiff                  = ""
 source_width_px          = 9916
 source_height_px         = 8859
 assume_durham_native_gsd = false
-tree_labels              = [1]
+# tree_labels intentionally omitted — select interactively on first run (see above).
 col_a                    = "../data/site_images/kingman_farm.jpg"
 col_a_overlay            = "../output/kingman_farm/cluster/cluster_overlay_k1.png"
 col_b                    = "../output/kingman_farm/kde/kde_density_heatmap.png"
