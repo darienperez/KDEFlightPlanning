@@ -3411,3 +3411,47 @@ module TreeLabelSelectionTests
         end
     end
 end
+
+# ===========================================================================
+# 17. Cross-site orchestrator static guard (scripts/preprocess_site_image.jl)
+#
+# The cross-site producer is a THIN orchestrator: it must drive the pipeline
+# only through the package's exported `report_*` / pipeline functions and must
+# NOT reintroduce a parallel visualisation implementation. Loading the whole
+# script needs CairoMakie + GDAL + a raster, so these are cheap static checks
+# on the source text: (1) it parses; (2) the bespoke functions we deleted stay
+# deleted; (3) the canonical entry points it must reuse are actually called.
+# This is the regression guard for the invented `render_cluster_overlays` name.
+# ===========================================================================
+@testset "cross-site orchestrator: thin, reuses canonical API (static)" begin
+    script = joinpath(@__DIR__, "..", "scripts", "preprocess_site_image.jl")
+    @test isfile(script)
+    src = read(script, String)
+
+    # (1) Whole file parses (catches undefined-syntax / half-edited rewrites).
+    @test Meta.parseall(src) isa Expr
+
+    # (2) The deleted bespoke visualisation / GSD machinery must NOT return.
+    for banned in ("render_cluster_overlays", "resolve_meters_per_pixel",
+                   "assume_durham_native_gsd", "source_width_px",
+                   "source_height_px", "meters_per_pixel")
+        @test !occursin(banned, src)
+    end
+
+    # (3) Each column must be produced by the canonical package function.
+    for canonical in ("report_cluster_overlays",     # column (a)
+                      "report_cluster_lab_summary",   # greenness hint
+                      "report_tree_label_decision",   # decision record
+                      "report_kde_density",           # column (b)
+                      "report_speed_map",             # column (b)
+                      "write_waypoints_csv",          # column (c)
+                      "report_waypoints_overlay",     # column (c)
+                      "build_mask_from_image_strided", # clustering
+                      "build_density_surface",        # KDE surface
+                      "plan_mission")                 # boustrophedon
+        @test occursin(canonical, src)
+    end
+
+    # The interactive label workflow must go through the shared helpers.
+    @test occursin("include(joinpath(@__DIR__, \"tree_label_selection.jl\"))", src)
+end

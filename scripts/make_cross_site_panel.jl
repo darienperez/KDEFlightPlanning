@@ -185,8 +185,8 @@ end
 
 """
     _provisional_stamp!(fig, cell) — overlay a "PROVISIONAL" ribbon on a cell
-    whose waypoint plan is NOT a surveyed metric plan (image-space or assumed
-    GSD from a non-georeferenced screenshot). Keeps the figure honest about
+    whose waypoint plan is NOT a surveyed metric plan (from a non-georeferenced
+    image fallback, so spacing is in pixels). Keeps the figure honest about
     scale so no reader mistakes it for a 40 m-spaced, publication-ready plan.
 """
 function _provisional_stamp!(fig, cell)
@@ -194,7 +194,7 @@ function _provisional_stamp!(fig, cell)
     hidedecorations!(ax); hidespines!(ax)
     xlims!(ax, 0, 1); ylims!(ax, 0, 1)
     text!(ax, 0.5, 0.06;
-          text = "PROVISIONAL — image-space / assumed GSD (not surveyed metric)",
+          text = "PROVISIONAL — image-space (pixel units, not surveyed metric)",
           align = (:center, :center), fontsize = 9,
           color = (:red, 0.9), font = :bold)
     return ax

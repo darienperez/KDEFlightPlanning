@@ -44,11 +44,9 @@ Decide which raster a site is processed from, GeoTIFF-first:
 
   • `:geotiff` when the site's `geotiff` key resolves to an existing file — the
     GeoTIFF is the AUTHORITATIVE source for BOTH the RGB pixels and the
-    geospatial transform/CRS (native m/px from its geotransform; NO screenshot
-    resample factors are applied).
+    geospatial transform/CRS (native m/px from its geotransform).
   • `:image`   when there is no usable GeoTIFF but the `image` key resolves to an
-    existing file — the JPEG/PNG is a FALLBACK only (image-space, or an
-    explicitly-supplied `meters_per_pixel`).
+    existing file — the JPEG/PNG is a FALLBACK only (pixel-space, no CRS).
   • `:none`    when neither resolves to a readable file (the site is skipped).
 
 A `geotiff` key that is present but points at a missing file falls through to the
