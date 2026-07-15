@@ -2,8 +2,12 @@
 #
 # Consumed by TWO scripts:
 #   • scripts/preprocess_site_image.jl  — runs the k-medoids → KDE →
-#     2–8 m/s → boustrophedon pipeline on each site's `image` and writes the
-#     column (a)/(b)/(c) artefacts under output/<slug>/.
+#     2–8 m/s → boustrophedon pipeline on each site and writes the column
+#     (a)/(b)/(c) artefacts under output/<slug>/. Input is chosen GeoTIFF-first:
+#     a readable `geotiff` is AUTHORITATIVE for both the RGB pixels and the
+#     transform/CRS (native m/px from its geotransform; `source_width_px`/
+#     `source_height_px` are IGNORED). The `image` JPEG is a FALLBACK only,
+#     used when no usable `geotiff` is supplied.
 #   • scripts/make_cross_site_panel.jl  — composes the 4×3 figure from the
 #     per-site col_* paths below.
 #
@@ -46,6 +50,9 @@ kmedoids_k_range       = [2, 8]
 track_spacing_m        = 40.0    # metric flight-line spacing (metric mode only)
 min_waypoint_spacing_m = 10.0
 max_waypoint_spacing_m = 30.0
+cluster_stride         = 1       # cluster on an N×-decimated grid for large
+                                 # GeoTIFFs (full ground extent preserved); the
+                                 # bundled screenshots are small so default = 1.
 
 # ── Row 1: Durham, NH (primary study site) ─────────────────────────────────
 # Column (c) uses the REAL bundled density-aware waypoints (GridX,GridY,Height,
@@ -63,20 +70,21 @@ col_c_speedcol = "Speed"
 provisional    = false
 
 # ── Row 2: OxBow Farm ───────────────────────────────────────────────────────
-# Non-georeferenced JPEG screenshot (1328×1080). No CRS/GSD in the JPEG.
-# The JPEG is a DISPLAY-RESAMPLED view of a source orthomosaic that is
-# 11427×9281 px (W×H). The x and y resample factors DIFFER
-# (11427/1328 ≈ 8.60 vs 9281/1080 ≈ 8.59), so a single isotropic factor is
-# wrong — `source_width_px`/`source_height_px` expose both axes independently.
-# METRIC PROCESSING IS DISABLED until the source GeoTIFF geotransform is
-# supplied via `geotiff` (extract/verify it with scripts/inspect_geotiff.jl).
-# Until then the row stays image-space / provisional = true.
+# Preferred: set `geotiff` to the source ortho .tif — it becomes the
+# AUTHORITATIVE RGB + transform/CRS source (native m/px from its geotransform;
+# the JPEG and the source_*_px factors below are then IGNORED).
+# Fallback (current): non-georeferenced JPEG screenshot (1328×1080), no CRS/GSD.
+# The JPEG is a DISPLAY-RESAMPLED view of a 11427×9281 px (W×H) source ortho;
+# the x/y resample factors DIFFER (11427/1328 ≈ 8.60 vs 9281/1080 ≈ 8.59), so
+# `source_width_px`/`source_height_px` expose both axes independently. These are
+# only used by the `assume_durham_native_gsd` fallback; without a `geotiff` the
+# row stays image-space / provisional = true.
 [[site]]
 name                     = "OxBow Farm"
 image                    = "../data/site_images/oxbow_farm.jpg"
-geotiff                  = ""        # ← set to the source ortho .tif to enable metric mode
-source_width_px          = 11427     # source orthomosaic width  (px)
-source_height_px         = 9281      # source orthomosaic height (px)
+geotiff                  = ""        # ← set to the source ortho .tif → authoritative metric mode
+source_width_px          = 11427     # source ortho width  (px) — IGNORED when `geotiff` is set
+source_height_px         = 9281      # source ortho height (px) — IGNORED when `geotiff` is set
 assume_durham_native_gsd = false     # disabled: JPEG is display-resampled (anisotropic)
 # tree_labels intentionally omitted — run preprocess_site_image.jl interactively
 # once to review cluster_overlay_k*.png and select the vegetation cluster(s); the
@@ -91,15 +99,16 @@ col_c_speedcol           = "speed"
 provisional              = true
 
 # ── Row 3: Hubbard Brook ─────────────────────────────────────────────────────
-# Screenshot 1212×1080; source ortho 12609×9811 px (W×H). Resample factors are
-# strongly anisotropic (12609/1212 ≈ 10.40 vs 9811/1080 ≈ 9.08). Metric mode
-# disabled until `geotiff` is provided.
+# Set `geotiff` to make it authoritative (native m/px; source_*_px ignored).
+# Fallback screenshot 1212×1080; source ortho 12609×9811 px (W×H). Resample
+# factors are strongly anisotropic (12609/1212 ≈ 10.40 vs 9811/1080 ≈ 9.08).
+# Metric mode via the JPEG fallback stays disabled until `geotiff` is provided.
 [[site]]
 name                     = "Hubbard Brook"
 image                    = "../data/site_images/hubbard_brook.jpg"
-geotiff                  = ""
-source_width_px          = 12609
-source_height_px         = 9811
+geotiff                  = ""        # ← set to the source ortho .tif → authoritative metric mode
+source_width_px          = 12609     # IGNORED when `geotiff` is set
+source_height_px         = 9811      # IGNORED when `geotiff` is set
 assume_durham_native_gsd = false
 # tree_labels intentionally omitted — select interactively on first run (see above).
 col_a                    = "../data/site_images/hubbard_brook.jpg"
@@ -112,15 +121,16 @@ col_c_speedcol           = "speed"
 provisional              = true
 
 # ── Row 4: Kingman Farm ──────────────────────────────────────────────────────
-# Screenshot 1390×1080; source ortho 9916×8859 px (W×H). Resample factors are
-# anisotropic (9916/1390 ≈ 7.13 vs 8859/1080 ≈ 8.20). Metric mode disabled
-# until `geotiff` is provided.
+# Set `geotiff` to make it authoritative (native m/px; source_*_px ignored).
+# Fallback screenshot 1390×1080; source ortho 9916×8859 px (W×H). Resample
+# factors are anisotropic (9916/1390 ≈ 7.13 vs 8859/1080 ≈ 8.20). Metric mode
+# via the JPEG fallback stays disabled until `geotiff` is provided.
 [[site]]
 name                     = "Kingman Farm"
 image                    = "../data/site_images/kingman_farm.jpg"
-geotiff                  = ""
-source_width_px          = 9916
-source_height_px         = 8859
+geotiff                  = ""        # ← set to the source ortho .tif → authoritative metric mode
+source_width_px          = 9916      # IGNORED when `geotiff` is set
+source_height_px         = 8859      # IGNORED when `geotiff` is set
 assume_durham_native_gsd = false
 # tree_labels intentionally omitted — select interactively on first run (see above).
 col_a                    = "../data/site_images/kingman_farm.jpg"

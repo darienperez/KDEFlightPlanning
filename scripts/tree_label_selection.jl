@@ -24,6 +24,49 @@ tree_labels_slug(name::AbstractString) =
     lowercase(replace(strip(name), r"[^A-Za-z0-9]+" => "_")) |> s -> strip(s, '_')
 
 """
+    resolve_input_path(base_dir, p) -> String
+
+Resolve a possibly-relative config path against `base_dir` (the config file's
+directory). Returns `""` for a missing/empty value. Mirrors `_resolve_path` in
+the producer but is kept here (stdlib-only) so the precedence logic is unit-
+testable without loading the pipeline.
+"""
+function resolve_input_path(base_dir::AbstractString, p)
+    (p === nothing || isempty(String(p))) && return ""
+    ps = String(p)
+    isabspath(ps) ? ps : abspath(joinpath(base_dir, ps))
+end
+
+"""
+    select_site_input(site, base_dir) -> (kind::Symbol, path::String)
+
+Decide which raster a site is processed from, GeoTIFF-first:
+
+  • `:geotiff` when the site's `geotiff` key resolves to an existing file — the
+    GeoTIFF is the AUTHORITATIVE source for BOTH the RGB pixels and the
+    geospatial transform/CRS (native m/px from its geotransform; NO screenshot
+    resample factors are applied).
+  • `:image`   when there is no usable GeoTIFF but the `image` key resolves to an
+    existing file — the JPEG/PNG is a FALLBACK only (image-space, or an
+    explicitly-supplied `meters_per_pixel`).
+  • `:none`    when neither resolves to a readable file (the site is skipped).
+
+A `geotiff` key that is present but points at a missing file falls through to the
+`image` fallback (so a not-yet-supplied ortho does not hard-fail the run).
+"""
+function select_site_input(site, base_dir::AbstractString)
+    gtif = resolve_input_path(base_dir, get(site, "geotiff", ""))
+    if !isempty(gtif) && isfile(gtif)
+        return (:geotiff, gtif)
+    end
+    img = resolve_input_path(base_dir, get(site, "image", ""))
+    if !isempty(img) && isfile(img)
+        return (:image, img)
+    end
+    return (:none, "")
+end
+
+"""
     site_configured_tree_labels(site) -> Union{Vector{Int}, Nothing}
 
 Return the explicitly-configured, nonempty integer `tree_labels` from a parsed

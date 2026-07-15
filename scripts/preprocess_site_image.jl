@@ -44,36 +44,47 @@ Metric waypoint generation is REFUSED without a scale unless `--preview` is
 passed, in which case an image-space provisional plan is emitted instead.
 
 ──────────────────────────────────────────────────────────────────────────
-Scale extraction from a source geotransform
+Input selection + scale extraction (GeoTIFF is authoritative)
 ──────────────────────────────────────────────────────────────────────────
-Per-axis metres/px is resolved (first match wins):
+Each site is processed from ONE raster, chosen GeoTIFF-first:
+
+  • `geotiff` resolves to a readable file → it is the AUTHORITATIVE source for
+    BOTH the RGB pixels AND the geospatial transform/CRS. RGB is read with
+    `load_rgb_geotiff`; native metres/px come straight from
+    `geotransform_resolution(gt)` (hypot of the affine axis vectors, so
+    rotation/skew are handled). NO screenshot resample factor is applied and
+    `source_width_px`/`source_height_px` are ignored in this mode.
+  • otherwise, `image` (JPEG/PNG) is a FALLBACK only — image-space, or a scale
+    resolved by `resolve_meters_per_pixel` (see below).
+
+For the image FALLBACK, per-axis metres/px is resolved (first match wins):
 
   1. `meters_per_pixel` set on the site  → used verbatim (isotropic).
-  2. `geotiff` path set on the site       → read its GDAL geotransform via the
-     package's `read_band` and take `geotransform_resolution` (hypot of the
-     affine column/row axis vectors, so rotation/skew are handled — not merely
-     abs(dx)/abs(dy)), then scale each axis by its resample factor (below).
-  3. `assume_durham_native_gsd = true`    → (opt-in, default false) use the
+  2. `assume_durham_native_gsd = true`   → (opt-in, default false) use the
      bundled Durham validation ortho geotransform `GT_NATIVE` (≈0.02837 m/px)
-     as the source GSD × per-axis factor.
-  4. otherwise                            → IMAGE-SPACE.
+     × per-axis resample factor.
+  3. otherwise                           → IMAGE-SPACE.
 
-**Anisotropic resample factors.** The screenshots are DISPLAY-RESAMPLED views
-of the source ortho, and the x/y factors generally differ (JPEG aspect ratio ≠
-source aspect ratio), so a single isotropic factor is wrong. Declare the source
-orthomosaic dimensions in config:
+**Anisotropic resample factors (image fallback only).** A display-resampled
+screenshot's x/y factors generally differ (JPEG aspect ratio ≠ source aspect
+ratio). Declare the source orthomosaic dimensions in config:
     source_width_px  = <Wsrc>    # factor_x = source_width_px  / screenshot_W
     source_height_px = <Hsrc>    # factor_y = source_height_px / screenshot_H
-The screenshot GSD is then `mpp_x = xres·factor_x`, `mpp_y = yres·factor_y`.
-(A legacy isotropic `source_px_per_screenshot_px` is honoured only when the
-`source_*_px` pair is absent.)
+These factors scale the `assume_durham_native_gsd` GSD and are IGNORED whenever
+a `geotiff` is present. (A legacy isotropic `source_px_per_screenshot_px` is
+honoured only when the `source_*_px` pair is absent.)
+
+**Large rasters.** Set `cluster_stride = N` (per-site or top-level) to cluster
+on an N×-decimated grid; the world extent still spans the full ground footprint,
+so metric spacing stays correct.
 
 Usage:
     julia --project=. scripts/preprocess_site_image.jl CONFIG.toml [options]
 
     CONFIG.toml   Panel/preprocess TOML with [[site]] blocks (see
-                  config/cross_site_panel.toml). Each site needs an `image`
-                  key to be processed; sites without one are skipped.
+                  config/cross_site_panel.toml). Each site needs a readable
+                  `geotiff` (preferred, authoritative) or `image` (fallback) to
+                  be processed; sites with neither are skipped.
 
 Options:
     --site NAME   Process only the site whose `name` matches NAME.
@@ -142,25 +153,29 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    resolve_meters_per_pixel(site, base_dir, W, H)
+    resolve_meters_per_pixel(site, W, H)
         -> (mpp_x, mpp_y, source, factor_x, factor_y)
+
+Scale resolution for the **image (JPEG/PNG) fallback path only**. When a site
+supplies a `geotiff`, the GeoTIFF is loaded upstream (`select_site_input` →
+`load_rgb_geotiff`) as the authoritative RGB + geotransform source and this
+function is NOT called — native m/px comes straight from
+`geotransform_resolution(gt)` with no screenshot resample factor.
 
 `mpp_x === nothing` ⇒ image-space (no reliable scale). Otherwise `mpp_x`/`mpp_y`
 are metres per screenshot-pixel along each axis and `source` documents where the
-scale came from.
+scale came from:
 
-The screenshots are DISPLAY-RESAMPLED views of a source orthomosaic, and the
-x/y resample factors generally differ (the JPEG aspect ratio ≠ the source
-aspect ratio). We therefore keep the axes independent:
+  1. explicit `meters_per_pixel` (isotropic; factors = 1); else
+  2. opt-in `assume_durham_native_gsd` (`GT_NATIVE` × per-axis factor); else
+  3. image-space (no scale).
 
-    factor_x = source_width_px  / W        # source px per screenshot px, x
-    factor_y = source_height_px / H        # source px per screenshot px, y
-
-The source ground resolution comes from the source GeoTIFF's affine
-geotransform (`geotransform_resolution`, hypot of the axis vectors), so a
-screenshot pixel spans `xres * factor_x` metres in x and `yres * factor_y` in y.
+The anisotropic factors `factor_x = source_width_px/W`,
+`factor_y = source_height_px/H` describe a screenshot that was display-resampled
+from a source ortho; they are only meaningful for the `assume_durham_native_gsd`
+fallback and are ignored entirely in GeoTIFF mode.
 """
-function resolve_meters_per_pixel(site, base_dir, W::Int, H::Int)
+function resolve_meters_per_pixel(site, W::Int, H::Int)
     # Anisotropic source-px-per-screenshot-px factors. Prefer explicit source
     # ortho dimensions (one per axis); fall back to a legacy isotropic factor.
     sw = _get(site, "source_width_px")
@@ -178,20 +193,9 @@ function resolve_meters_per_pixel(site, base_dir, W::Int, H::Int)
         return m, m, "explicit meters_per_pixel", 1.0, 1.0
     end
 
-    # 2. Source GeoTIFF geotransform via the package's read_band (ArchGDAL).
-    gtif = _resolve_path(base_dir, _get(site, "geotiff", ""))
-    if !isempty(gtif) && isfile(gtif)
-        _, gt, _ = read_band(gtif)                     # (Matrix, GeoTransform, crs)
-        xres, yres = geotransform_resolution(gt)       # metres / SOURCE pixel
-        return xres * factor_x, yres * factor_y,
-               "geotiff geotransform ($(basename(gtif))): src $(round(xres;digits=6))×$(round(yres;digits=6)) m/px × " *
-               "factor $(round(factor_x;digits=3))×$(round(factor_y;digits=3))",
-               factor_x, factor_y
-    end
-
-    # 3. (Disabled by default) assume Durham native ortho GSD. Only fires if a
-    #    site explicitly opts in; the supplied screenshots set this false because
-    #    they are anisotropically resampled and need the real geotransform.
+    # 2. (Disabled by default) assume Durham native ortho GSD. Only fires if a
+    #    site explicitly opts in. Prefer supplying a `geotiff` (authoritative)
+    #    over this assumed scale.
     if _get(site, "assume_durham_native_gsd", false) == true
         xres, yres = geotransform_resolution(GT_NATIVE)
         return xres * factor_x, yres * factor_y,
@@ -200,7 +204,7 @@ function resolve_meters_per_pixel(site, base_dir, W::Int, H::Int)
                factor_x, factor_y
     end
 
-    # 4. Image-space (no scale). Metric column (c) refused unless --preview.
+    # 3. Image-space (no scale). Metric column (c) refused unless --preview.
     return nothing, nothing, "image-space (no CRS/GSD; supply `geotiff` for metric mode)",
            factor_x, factor_y
 end
@@ -311,9 +315,13 @@ end
 function process_site(site, base_dir::AbstractString, outroot::AbstractString;
                       preview::Bool, defaults, config_path::AbstractString)
     name  = String(_get(site, "name", "(unnamed)"))
-    image = _resolve_path(base_dir, _get(site, "image", ""))
-    if isempty(image) || !isfile(image)
-        @info "Skipping site (no readable `image`)" name image
+
+    # GeoTIFF-first input selection: a resolvable `geotiff` is authoritative for
+    # BOTH the RGB pixels and the geospatial transform/CRS; the `image` JPEG/PNG
+    # is a fallback used only when no usable GeoTIFF is supplied.
+    input_kind, input_path = select_site_input(site, base_dir)
+    if input_kind == :none
+        @info "Skipping site (neither `geotiff` nor `image` resolves to a readable file)" name geotiff=_get(site, "geotiff", "") image=_get(site, "image", "")
         return nothing
     end
 
@@ -324,27 +332,62 @@ function process_site(site, base_dir::AbstractString, outroot::AbstractString;
     mkpath(joinpath(outdir, "waypoints"))
 
     println("\n=== $name  ($slug) ===")
-    println("  image = $image")
 
-    # --- Load image ---------------------------------------------------------
-    img_raw = FileIO.load(image)                 # Matrix{<:Colorant}, row1=top
-    img = convert(Matrix{RGB{Float32}}, img_raw)
-    H, W = size(img)
-    println("  dims  = $(W)×$(H) px (W×H)")
-
-    # --- Resolve metric scale ----------------------------------------------
-    mpp_x, mpp_y, mpp_source, factor_x, factor_y =
-        resolve_meters_per_pixel(site, base_dir, W, H)
+    # --- Load RGB + resolve metric scale -----------------------------------
+    # GeoTIFF mode: native m/px straight from the geotransform, NO screenshot
+    # resample factor. Image mode: JPEG/PNG fallback + resolve_meters_per_pixel.
+    local img_full, mpp_x, mpp_y, mpp_source, factor_x, factor_y, crs
+    if input_kind == :geotiff
+        rs       = load_rgb_geotiff(input_path)          # authoritative RGB + gt + crs
+        img_full = convert(Matrix{RGB{Float32}}, rs.Z)
+        H_full, W_full = size(img_full)
+        xres, yres = geotransform_resolution(rs.gt)      # native metres / GeoTIFF pixel
+        mpp_x, mpp_y = xres, yres
+        factor_x = factor_y = 1.0                         # no display resample in GeoTIFF mode
+        crs = rs.crs
+        mpp_source = "geotiff geotransform ($(basename(input_path))): native " *
+                     "$(round(xres; digits=6))×$(round(yres; digits=6)) m/px (no screenshot resample)"
+        println("  input = $input_path   [GeoTIFF — authoritative RGB + transform/CRS]")
+        println("  dims  = $(W_full)×$(H_full) px (W×H)")
+        println("  crs   = ", isempty(crs) ? "<unknown>" : crs)
+        println("  scale = $(round(mpp_x; digits=6))×$(round(mpp_y; digits=6)) m/px  [native geotransform]")
+    else # :image
+        img_raw  = FileIO.load(input_path)               # Matrix{<:Colorant}, row1=top
+        img_full = convert(Matrix{RGB{Float32}}, img_raw)
+        H_full, W_full = size(img_full)
+        mpp_x, mpp_y, mpp_source, factor_x, factor_y =
+            resolve_meters_per_pixel(site, W_full, H_full)
+        crs = ""
+        println("  input = $input_path   [image fallback — JPEG/PNG, no CRS]")
+        println("  dims  = $(W_full)×$(H_full) px (W×H)")
+        println("  scale = ", (mpp_x !== nothing) ?
+            "$(round(mpp_x; digits=6))×$(round(mpp_y; digits=6)) m/px  [$mpp_source]" :
+            "IMAGE-SPACE  [$mpp_source]")
+    end
     metric = mpp_x !== nothing
-    println("  scale = ", metric ?
-        "$(round(mpp_x; digits=6))×$(round(mpp_y; digits=6)) m/px  [$mpp_source]" :
-        "IMAGE-SPACE  [$mpp_source]")
 
-    # World extents for the RasterGrid axes:
-    #   metric      → metres (xmax = W*mpp_x, ymax = H*mpp_y) so spacing_m honoured
-    #   image-space → pixels  (xmax = W,       ymax = H)       (spacing = pixels)
-    xmax = metric ? W * mpp_x : Float64(W)
-    ymax = metric ? H * mpp_y : Float64(H)
+    # --- Optional decimation for tractable clustering on large rasters ------
+    # Full-resolution orthomosaics (e.g. 11k×9k) are far too large to cluster at
+    # native resolution, so cluster on a stride-decimated grid. The world extent
+    # below still spans the FULL ground footprint, so metric spacing is honoured.
+    cluster_stride = max(1, Int(_get(site, "cluster_stride", defaults.cluster_stride)))
+    if cluster_stride > 1
+        img = Matrix(@view img_full[1:cluster_stride:end, 1:cluster_stride:end])
+        img_full = nothing                                # release full-res RGB for GC
+        H, W = size(img)
+        println("  cluster_stride = $cluster_stride → clustering grid $(W)×$(H) px " *
+                "(full-res ground extent preserved)")
+    else
+        img = img_full
+        H, W = H_full, W_full
+    end
+
+    # World extents for the RasterGrid axes span the FULL ground footprint
+    # regardless of clustering decimation:
+    #   metric      → metres (xmax = W_full*mpp_x, ymax = H_full*mpp_y)
+    #   image-space → full pixels (xmax = W_full,   ymax = H_full)
+    xmax = metric ? W_full * mpp_x : Float64(W_full)
+    ymax = metric ? H_full * mpp_y : Float64(H_full)
 
     # --- Params -------------------------------------------------------------
     seed        = Int(_get(site, "seed", defaults.seed))
@@ -484,9 +527,14 @@ function process_site(site, base_dir::AbstractString, outroot::AbstractString;
     prov = Dict(
         "site"                 => name,
         "slug"                 => slug,
-        "image"                => image,
-        "image_width_px"       => W,
-        "image_height_px"      => H,
+        "input_kind"           => String(input_kind),
+        "input_path"           => input_path,
+        "crs"                  => crs,
+        "image_width_px"       => W_full,
+        "image_height_px"      => H_full,
+        "cluster_stride"       => cluster_stride,
+        "cluster_grid_w"       => W,
+        "cluster_grid_h"       => H,
         "mode"                 => metric ? "metric" : "image-space",
         "meters_per_pixel_x"   => metric ? mpp_x : nothing,
         "meters_per_pixel_y"   => metric ? mpp_y : nothing,
@@ -555,6 +603,7 @@ function main()
         track_spacing_m = Float64(get(raw, "track_spacing_m", 40.0)),
         min_wp_m      = Float64(get(raw, "min_waypoint_spacing_m", 10.0)),
         max_wp_m      = Float64(get(raw, "max_waypoint_spacing_m", 30.0)),
+        cluster_stride = Int(get(raw, "cluster_stride", 1)),
     )
 
     sites = get(raw, "site", Any[])
@@ -567,13 +616,13 @@ function main()
     processed = 0
     for s in sites
         site_filter !== nothing && String(get(s, "name", "")) != site_filter && continue
-        haskey(s, "image") || continue
+        (haskey(s, "geotiff") || haskey(s, "image")) || continue
         process_site(s, base, outroot; preview = preview, defaults = defaults,
                      config_path = config_path)
         processed += 1
     end
     println("\n[preprocess] done — processed $processed site(s).")
-    processed == 0 && @warn "No sites had an `image` key (or --site filter matched none)."
+    processed == 0 && @warn "No sites had a `geotiff` or `image` key (or --site filter matched none)."
 end
 
 abspath(PROGRAM_FILE) == abspath(@__FILE__) && main()

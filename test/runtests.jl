@@ -2818,6 +2818,47 @@ end
 end
 
 # ===========================================================================
+# 53b. GeoTIFF-first native scale — no screenshot resample factor applied
+# ===========================================================================
+@testset "geotiff native m/px (anisotropic; no screenshot factor)" begin
+    using ArchGDAL
+    AG_ = ArchGDAL
+    mktempdir() do dir
+        path = joinpath(dir, "aniso.tif")
+        H, W = 9, 15
+        R = rand(UInt8, H, W); G = rand(UInt8, H, W); B = rand(UInt8, H, W)
+        # Anisotropic north-up geotransform: dx = 0.5, dy = -0.25 (metres/px).
+        xres_native, yres_native = 0.5, 0.25
+        gt = [500000.0, xres_native, 0.0, 4000000.0, 0.0, -yres_native]
+        AG_.create(path; driver = AG_.getdriver("GTiff"),
+                          width = W, height = H, nbands = 3, dtype = UInt8) do ds
+            AG_.setgeotransform!(ds, gt)
+            AG_.write!(ds, permutedims(R), 1)
+            AG_.write!(ds, permutedims(G), 2)
+            AG_.write!(ds, permutedims(B), 3)
+        end
+        rs = load_rgb_geotiff(path)
+
+        # Native metres/px come straight from the geotransform — anisotropic,
+        # independent of any screenshot dimensions. This is the value the
+        # GeoTIFF-authoritative producer path uses (factor_x = factor_y = 1).
+        xres, yres = geotransform_resolution(rs.gt)
+        @test xres ≈ xres_native
+        @test yres ≈ yres_native
+        @test xres != yres                                   # genuinely anisotropic
+
+        # Full-ground metric extent = pixels × native GSD (no source_*_px factor).
+        @test W * xres ≈ 7.5
+        @test H * yres ≈ 2.25
+
+        # A hypothetical screenshot-resample factor (e.g. source_width_px/W) must
+        # NOT change the native resolution in GeoTIFF mode.
+        bogus_factor = 8.6
+        @test !(xres ≈ xres_native * bogus_factor)
+    end
+end
+
+# ===========================================================================
 # 54. lidar_counts.jl: bin_to_count_grid + tables (synthetic, no LAS)
 # ===========================================================================
 @testset "lidar_counts: bin_to_count_grid synthetic" begin
@@ -3123,6 +3164,44 @@ module TreeLabelSelectionTests
         @testset "render_tree_labels" begin
             @test render_tree_labels([1]) == "[1]"
             @test render_tree_labels([1, 3]) == "[1, 3]"
+        end
+
+        @testset "resolve_input_path" begin
+            # Empty / missing → "" (no path).
+            @test resolve_input_path("/base", "") == ""
+            @test resolve_input_path("/base", nothing) == ""
+            # Relative resolves against base_dir; absolute passes through.
+            @test resolve_input_path("/base/dir", "img.jpg") == abspath("/base/dir/img.jpg")
+            @test resolve_input_path("/base", "/abs/img.tif") == "/abs/img.tif"
+        end
+
+        @testset "select_site_input precedence (GeoTIFF-first, image fallback)" begin
+            mktempdir() do dir
+                tif = joinpath(dir, "ortho.tif")
+                jpg = joinpath(dir, "shot.jpg")
+                write(tif, "fake-geotiff-bytes")   # existence is all select_site_input checks
+                write(jpg, "fake-jpeg-bytes")
+
+                # GeoTIFF wins even when an `image` also exists.
+                @test select_site_input(Dict("geotiff" => tif, "image" => jpg), dir) ==
+                      (:geotiff, tif)
+                # GeoTIFF alone.
+                @test select_site_input(Dict("geotiff" => "ortho.tif"), dir) ==
+                      (:geotiff, tif)
+                # No geotiff key → image fallback.
+                @test select_site_input(Dict("image" => "shot.jpg"), dir) ==
+                      (:image, jpg)
+                # geotiff key present but file MISSING → falls back to image.
+                @test select_site_input(Dict("geotiff" => "nope.tif", "image" => jpg), dir) ==
+                      (:image, jpg)
+                # Empty geotiff string → image fallback.
+                @test select_site_input(Dict("geotiff" => "", "image" => "shot.jpg"), dir) ==
+                      (:image, jpg)
+                # Neither readable → :none (site skipped).
+                @test select_site_input(Dict("geotiff" => "x.tif", "image" => "y.jpg"), dir) ==
+                      (:none, "")
+                @test select_site_input(Dict{String,Any}(), dir) == (:none, "")
+            end
         end
 
         @testset "stdin_is_tty resolves Base.isatty (regression: UndefVarError)" begin
