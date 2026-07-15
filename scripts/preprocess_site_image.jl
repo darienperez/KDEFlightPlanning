@@ -591,6 +591,7 @@ function main()
     config_path = abspath(positional[1])
     isfile(config_path) || error("Config not found: $config_path")
 
+    assert_no_conflict_markers(config_path)   # clear error on committed merge/stash markers
     raw  = TOML.parsefile(config_path)
     base = dirname(config_path)
 

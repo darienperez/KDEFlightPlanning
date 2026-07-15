@@ -82,15 +82,9 @@ cluster_stride         = 1       # cluster on an N×-decimated grid for large
 [[site]]
 name                     = "OxBow Farm"
 image                    = "../data/site_images/oxbow_farm.jpg"
-<<<<<<< Updated upstream
-geotiff                  = ""        # ← set to the source ortho .tif → authoritative metric mode
+geotiff                  = "/Users/darien/Desktop/Academia/Research/UAV Applications/Dr. Jacob's Research/Code/Julia/VariableSpeedWaypoints/data/OB_reproj_cropped.tiff"  # authoritative source ortho (RGB + transform/CRS)
 source_width_px          = 11427     # source ortho width  (px) — IGNORED when `geotiff` is set
 source_height_px         = 9281      # source ortho height (px) — IGNORED when `geotiff` is set
-=======
-geotiff                  = "/Users/darien/Desktop/Academia/Research/UAV Applications/Dr. Jacob's Research/Code/Julia/VariableSpeedWaypoints/data/OB_reproj_cropped.tiff"        # ← set to the source ortho .tif to enable metric mode
-source_width_px          = 11427     # source orthomosaic width  (px)
-source_height_px         = 9281      # source orthomosaic height (px)
->>>>>>> Stashed changes
 assume_durham_native_gsd = false     # disabled: JPEG is display-resampled (anisotropic)
 # tree_labels intentionally omitted — run preprocess_site_image.jl interactively
 # once to review cluster_overlay_k*.png and select the vegetation cluster(s); the
@@ -112,15 +106,9 @@ provisional              = true
 [[site]]
 name                     = "Hubbard Brook"
 image                    = "../data/site_images/hubbard_brook.jpg"
-<<<<<<< Updated upstream
-geotiff                  = ""        # ← set to the source ortho .tif → authoritative metric mode
+geotiff                  = "/Users/darien/Desktop/Academia/Research/UAV Applications/Dr. Jacob's Research/Code/Julia/VariableSpeedWaypoints/data/HB_ortho_P4_2024_01_18.tif"  # authoritative source ortho (RGB + transform/CRS)
 source_width_px          = 12609     # IGNORED when `geotiff` is set
 source_height_px         = 9811      # IGNORED when `geotiff` is set
-=======
-geotiff                  = "/Users/darien/Desktop/Academia/Research/UAV Applications/Dr. Jacob's Research/Code/Julia/VariableSpeedWaypoints/data/HB_ortho_P4_2024_01_18.tif"
-source_width_px          = 12609
-source_height_px         = 9811
->>>>>>> Stashed changes
 assume_durham_native_gsd = false
 # tree_labels intentionally omitted — select interactively on first run (see above).
 col_a                    = "../data/site_images/hubbard_brook.jpg"
@@ -140,15 +128,9 @@ provisional              = true
 [[site]]
 name                     = "Kingman Farm"
 image                    = "../data/site_images/kingman_farm.jpg"
-<<<<<<< Updated upstream
-geotiff                  = ""        # ← set to the source ortho .tif → authoritative metric mode
+geotiff                  = "/Users/darien/Desktop/Academia/Research/UAV Applications/Dr. Jacob's Research/Code/Julia/VariableSpeedWaypoints/data/KF_ortho_P4_2024_01_18_cropped.tif"  # authoritative source ortho (RGB + transform/CRS)
 source_width_px          = 9916      # IGNORED when `geotiff` is set
 source_height_px         = 8859      # IGNORED when `geotiff` is set
-=======
-geotiff                  = "/Users/darien/Desktop/Academia/Research/UAV Applications/Dr. Jacob's Research/Code/Julia/VariableSpeedWaypoints/data/KF_ortho_P4_2024_01_18_cropped.tif"
-source_width_px          = 9916
-source_height_px         = 8859
->>>>>>> Stashed changes
 assume_durham_native_gsd = false
 # tree_labels intentionally omitted — select interactively on first run (see above).
 col_a                    = "../data/site_images/kingman_farm.jpg"

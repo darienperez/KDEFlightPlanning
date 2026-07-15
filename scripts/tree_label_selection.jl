@@ -297,3 +297,44 @@ function persist_tree_labels(config_path::AbstractString, site_name::AbstractStr
     end
     return (true, "")
 end
+
+"""
+    find_conflict_markers(lines) -> Vector{Tuple{Int,String}}
+
+Return `(lineno, marker)` for every VCS merge/stash conflict marker line
+(`<<<<<<<`, `=======`, `>>>>>>>` — git writes exactly seven characters) in
+`lines`. A line starting with seven of these characters cannot be valid TOML,
+so this lets the producer fail with a clear, actionable message instead of the
+opaque `TOML.parsefile` "expected …" error the markers would otherwise trigger.
+
+Note: `persist_tree_labels` never emits such markers (it only writes a
+`tree_labels = [...]` line); they come from an unresolved `git merge`/`git
+stash` conflict committed by hand. This check is a guard for that human error.
+"""
+function find_conflict_markers(lines::AbstractVector{<:AbstractString})
+    marker = r"^(<{7}|={7}|>{7})(\s|$)"
+    hits = Tuple{Int,String}[]
+    for (i, ln) in enumerate(lines)
+        m = match(marker, ln)
+        m === nothing || push!(hits, (i, String(m.captures[1])))
+    end
+    return hits
+end
+
+"""
+    assert_no_conflict_markers(config_path)
+
+Throw a clear error if `config_path` contains unresolved VCS conflict markers.
+Call this before `TOML.parsefile` so a stash/merge conflict committed into the
+config produces an actionable message pointing at the offending line numbers.
+"""
+function assert_no_conflict_markers(config_path::AbstractString)
+    hits = find_conflict_markers(readlines(config_path))
+    isempty(hits) && return nothing
+    locs = join((string(l) for (l, _) in hits), ", ")
+    error(string(
+        "Config $config_path contains unresolved VCS conflict markers ",
+        "(git merge/stash) at line(s) ", locs, ". Resolve the conflict — keep ",
+        "one side and delete the `<<<<<<<`, `=======`, and `>>>>>>>` lines — ",
+        "before running preprocessing."))
+end

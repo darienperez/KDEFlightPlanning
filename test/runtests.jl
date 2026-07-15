@@ -3352,5 +3352,62 @@ module TreeLabelSelectionTests
                 @test occursin("no [[site]] blocks", msg)
             end
         end
+
+        # -------------------------------------------------------------------
+        # find_conflict_markers / assert_no_conflict_markers — regression for
+        # a git stash/merge conflict committed into cross_site_panel.toml
+        # (TOML.parsefile otherwise dies with an opaque "expected key" at the
+        # `<<<<<<< Updated upstream` line). persist_tree_labels never produces
+        # these; this guards the manual-conflict case.
+        # -------------------------------------------------------------------
+        @testset "find_conflict_markers flags a stash-pop conflict block" begin
+            # Byte-for-byte the shape that shipped in the failing config: a
+            # geotiff conflict inside a [[site]] block.
+            cfg = """
+            [[site]]
+            name                     = "OxBow Farm"
+            image                    = "../data/site_images/oxbow_farm.jpg"
+            <<<<<<< Updated upstream
+            geotiff                  = ""
+            source_width_px          = 11427
+            =======
+            geotiff                  = "/Users/darien/Desktop/data/OB_reproj_cropped.tiff"
+            source_width_px          = 11427
+            >>>>>>> Stashed changes
+            provisional              = true
+            """
+            hits = find_conflict_markers(split(cfg, '\n'))
+            @test length(hits) == 3
+            @test [m for (_, m) in hits] == ["<<<<<<<", "=======", ">>>>>>>"]
+            @test [l for (l, _) in hits] == [4, 7, 10]
+        end
+
+        @testset "find_conflict_markers: clean config has none" begin
+            clean = """
+            seed = 6213
+            [[site]]
+            name    = "OxBow Farm"
+            geotiff = "/Users/darien/Desktop/data/OB_reproj_cropped.tiff"
+            """
+            @test isempty(find_conflict_markers(split(clean, '\n')))
+            # A legit value that merely contains '=' or '<' is not a marker.
+            @test isempty(find_conflict_markers(["k = \"a = b\"", "cmp = \"<7\""]))
+        end
+
+        @testset "assert_no_conflict_markers errors with line numbers" begin
+            _with_tmp_config(
+                "[[site]]\nname = \"X\"\n<<<<<<< Updated upstream\ngeotiff = \"\"\n=======\ngeotiff = \"a.tif\"\n>>>>>>> Stashed changes\n") do path
+                err = try
+                    assert_no_conflict_markers(path); nothing
+                catch e; e; end
+                @test err isa ErrorException
+                @test occursin("conflict markers", err.msg)
+                @test occursin("3", err.msg)          # first marker line
+            end
+            # A conflict-free config passes silently.
+            _with_tmp_config("[[site]]\nname = \"X\"\ngeotiff = \"a.tif\"\n") do path
+                @test assert_no_conflict_markers(path) === nothing
+            end
+        end
     end
 end
