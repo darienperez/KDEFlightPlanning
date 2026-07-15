@@ -97,6 +97,19 @@ render_tree_labels(labels::AbstractVector{<:Integer}) =
     string("[", join(labels, ", "), "]")
 
 """
+    stdin_is_tty(io = stdin) -> Bool
+
+Whether `io` is an interactive terminal. `isatty` lives in `Base` but is NOT
+exported, so an unqualified `isatty(stdin)` in a script running in `Main` throws
+`UndefVarError: isatty not defined`. This wrapper qualifies it as `Base.isatty`
+(stable in the supported Julia ≥ 1.10) so the interactive-prompt gate works when
+the producer is launched with `julia --project=. scripts/preprocess_site_image.jl`.
+The `io` seam also lets the gate be exercised in unit tests (a non-TTY `IOBuffer`
+returns `false` via Base's generic `isatty(::IO)` fallback).
+"""
+stdin_is_tty(io::IO = stdin) = Base.isatty(io)
+
+"""
     prompt_tree_labels(k, overlay_paths; name, suggested, in_io=stdin, out_io=stdout)
         -> Vector{Int}
 

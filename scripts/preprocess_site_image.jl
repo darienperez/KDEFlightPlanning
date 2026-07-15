@@ -281,7 +281,7 @@ function resolve_site_tree_labels(cfg_labels, k::Int,
         return sort(unique(Int.(cfg_labels))), "config", false
     end
 
-    if !isatty(stdin)
+    if !stdin_is_tty()
         error(
             "No `tree_labels` configured for site \"$name\" and stdin is not a TTY.\n" *
             "This cross-site preprocessing path will NOT guess a vegetation cluster.\n" *

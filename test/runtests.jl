@@ -3125,6 +3125,17 @@ module TreeLabelSelectionTests
             @test render_tree_labels([1, 3]) == "[1, 3]"
         end
 
+        @testset "stdin_is_tty resolves Base.isatty (regression: UndefVarError)" begin
+            # Regression for `UndefVarError: isatty not defined in Main`: `isatty`
+            # is in Base but unexported, so an unqualified call in Main threw.
+            # Calling the wrapper must resolve the symbol and return a Bool without
+            # throwing (this is the exact gate that crashed resolve_site_tree_labels).
+            @test stdin_is_tty() isa Bool                    # default stdin, must not throw
+            # A non-TTY IOBuffer exercises Base's generic isatty(::IO) fallback.
+            @test stdin_is_tty(IOBuffer()) === false
+            @test stdin_is_tty(IOBuffer("1,3\n")) === false
+        end
+
         @testset "prompt_tree_labels reprompts on invalid input" begin
             # First two lines invalid (non-int, out-of-range), third valid.
             input  = IOBuffer("foo\n9\n1,3\n")
