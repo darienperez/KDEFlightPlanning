@@ -229,7 +229,7 @@ export is_kernel_agnostic
 # --- Reports / visuals (reports.jl) ---
 export report_ingest_preview, report_geotiff_metadata
 export report_lab_channels, report_pca_explained
-export report_cluster_metrics_sweep, report_cluster_overlays
+export report_cluster_metrics_sweep, report_cluster_overlays, LabelSelectionPreview
 export report_cluster_lab_summary, report_tree_label_decision
 export report_kde_density, report_speed_map
 export report_waypoints_overlay

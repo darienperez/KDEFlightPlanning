@@ -3204,14 +3204,13 @@ module TreeLabelSelectionTests
             end
         end
 
-        @testset "stdin_is_tty resolves Base.isatty (regression: UndefVarError)" begin
-            # Regression for `UndefVarError: isatty not defined in Main`: `isatty`
-            # is in Base but unexported, so an unqualified call in Main threw.
-            # Calling the wrapper must resolve the symbol and return a Bool without
-            # throwing (this is the exact gate that crashed resolve_site_tree_labels).
+        @testset "stdin_is_tty gates on Base.TTY (Julia 1.12: no Base.isatty)" begin
+            # On Julia 1.12 `Base.isatty` is undefined, so the gate is now
+            # `io isa Base.TTY`. It must return a Bool without throwing, and any
+            # non-TTY stream (a piped/redirected IOBuffer) must be false — this is
+            # the exact gate that decides whether the interactive prompt runs.
             @test stdin_is_tty() isa Bool                    # default stdin, must not throw
-            # A non-TTY IOBuffer exercises Base's generic isatty(::IO) fallback.
-            @test stdin_is_tty(IOBuffer()) === false
+            @test stdin_is_tty(IOBuffer()) === false         # in-memory stream ≠ TTY
             @test stdin_is_tty(IOBuffer("1,3\n")) === false
         end
 
