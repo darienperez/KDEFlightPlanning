@@ -20,7 +20,7 @@
 [paths]
 # REQUIRED for the planning stage. Replace with your (lower-res) orthomosaic.
 # Placeholder — the full-res Durham ortho is not bundled:
-rgb = "../data/site_images/ortho_2_20_2021_uncorrected_6348_NAD83_19N.tif"
+rgb = "../data/site_images/KF_ortho_P4_2024_01_18_cropped.tif"
 
 # OPTIONAL cover-class GeoTIFF used by the LiDAR counting stage (full pipeline).
 # gli = "../data/GLI_filtered_ortho_1_25_2021__cropped_co_registered_with_field.tif"
@@ -35,12 +35,12 @@ percent_densities_csv = "../data/ground_truth/percent_densities.csv"
 # bundled; supply if you have it.
 # gli_class_raster    = "../data/ground_truth/gli_class_263x324.tif"
 
-outdir = "../output/durham"
+outdir = "../output/kingman"
 
 [paths.waypoints]
 # Planned E density-aware waypoints (bundled, small). Used to derive planned
 # survey lines in the trajectory stage.
-Ed = "../data/ground_truth/E_density_aware__waypoints_xy.csv"
+# Ed = "../data/ground_truth/oxbow/E_density_aware__waypoints_xy.csv"
 
 [paths.trajectory]
 # OPTIONAL flown-track CSVs (NOT bundled — supply your local copies). When
