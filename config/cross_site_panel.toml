@@ -1,0 +1,33 @@
+# Cross-site 3-column panel config — cross_site_planning_panel.png
+#
+# Consumed by scripts/make_cross_site_panel.jl, which composes the figure from
+# the products written by scripts/make_cross_site_products.jl. The composer reads
+# each site's products_metadata.json and draws all three columns itself:
+#
+#   (a) Site           — source RGB orthomosaic (metadata `source_geotiff`)
+#   (b) Vegetation label — RGB base + selected-vegetation mask overlay
+#                          (metadata products.vegetation_mask)
+#   (c) KDE surface    — min-max-normalised [0,1] Epanechnikov KDE, rendered with
+#                        a single fixed [0,1] colour range shared across sites
+#                        (metadata products.kde_surface)
+#
+# Run the products runner first to populate <products_dir>/<slug>/:
+#   julia --project=. scripts/make_cross_site_products.jl config/cross_site_products.toml
+#
+# Paths are resolved relative to THIS file's directory (config/).
+
+products_dir = "../output/cross_site"   # root holding <slug>/products_metadata.json
+kde_colormap = "viridis"                # column (c) heatmap colormap
+mask_color   = "#FF6D00"                # column (b) vegetation overlay colour
+mask_alpha   = 0.45                     # column (b) overlay opacity
+
+# Optional: explicit site order / subset. When the [[site]] blocks are omitted,
+# every immediate subdirectory of products_dir that contains a
+# products_metadata.json is auto-discovered and sorted by site name.
+#
+# [[site]]
+# dir  = "durham-nh"        # subdirectory under products_dir (the runner's slug)
+# name = "Durham, NH"       # optional label (defaults to metadata site_name)
+#
+# [[site]]
+# dir  = "oxbow-farm"

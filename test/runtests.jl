@@ -2818,6 +2818,47 @@ end
 end
 
 # ===========================================================================
+# 53b. GeoTIFF-first native scale — no screenshot resample factor applied
+# ===========================================================================
+@testset "geotiff native m/px (anisotropic; no screenshot factor)" begin
+    using ArchGDAL
+    AG_ = ArchGDAL
+    mktempdir() do dir
+        path = joinpath(dir, "aniso.tif")
+        H, W = 9, 15
+        R = rand(UInt8, H, W); G = rand(UInt8, H, W); B = rand(UInt8, H, W)
+        # Anisotropic north-up geotransform: dx = 0.5, dy = -0.25 (metres/px).
+        xres_native, yres_native = 0.5, 0.25
+        gt = [500000.0, xres_native, 0.0, 4000000.0, 0.0, -yres_native]
+        AG_.create(path; driver = AG_.getdriver("GTiff"),
+                          width = W, height = H, nbands = 3, dtype = UInt8) do ds
+            AG_.setgeotransform!(ds, gt)
+            AG_.write!(ds, permutedims(R), 1)
+            AG_.write!(ds, permutedims(G), 2)
+            AG_.write!(ds, permutedims(B), 3)
+        end
+        rs = load_rgb_geotiff(path)
+
+        # Native metres/px come straight from the geotransform — anisotropic,
+        # independent of any screenshot dimensions. This is the value the
+        # GeoTIFF-authoritative producer path uses (factor_x = factor_y = 1).
+        xres, yres = geotransform_resolution(rs.gt)
+        @test xres ≈ xres_native
+        @test yres ≈ yres_native
+        @test xres != yres                                   # genuinely anisotropic
+
+        # Full-ground metric extent = pixels × native GSD (no source_*_px factor).
+        @test W * xres ≈ 7.5
+        @test H * yres ≈ 2.25
+
+        # A hypothetical screenshot-resample factor (e.g. source_width_px/W) must
+        # NOT change the native resolution in GeoTIFF mode.
+        bogus_factor = 8.6
+        @test !(xres ≈ xres_native * bogus_factor)
+    end
+end
+
+# ===========================================================================
 # 54. lidar_counts.jl: bin_to_count_grid + tables (synthetic, no LAS)
 # ===========================================================================
 @testset "lidar_counts: bin_to_count_grid synthetic" begin
@@ -3071,4 +3112,244 @@ end
 
 @testset "DEFAULT_REPORT_FORMATS is PNG only" begin
     @test KDEFlightPlanning.DEFAULT_REPORT_FORMATS == ["png"]
+end
+
+# ===========================================================================
+# 16. Vegetation cluster-label selection helpers (scripts/tree_label_selection.jl)
+#
+# These are the pure, stdlib-only helpers backing the interactive `tree_labels`
+# workflow in scripts/preprocess_site_image.jl. They are unit-tested here in a
+# throwaway module so the include() does not leak names into the test globals.
+# ===========================================================================
+module TreeLabelSelectionTests
+    using Test
+    include(joinpath(@__DIR__, "..", "scripts", "tree_label_selection.jl"))
+
+    @testset "tree-label selection helpers" begin
+
+        @testset "site_configured_tree_labels" begin
+            # Present, valid, nonempty → raw vector of Ints (order preserved).
+            @test site_configured_tree_labels(Dict("tree_labels" => [3, 1])) == [3, 1]
+            @test site_configured_tree_labels(Dict("tree_labels" => [2])) == [2]
+            # Integer-valued floats coerce.
+            @test site_configured_tree_labels(Dict("tree_labels" => [1.0, 2.0])) == [1, 2]
+            # Absent / empty / non-integer / non-list → nothing (NO default).
+            @test site_configured_tree_labels(Dict{String,Any}()) === nothing
+            @test site_configured_tree_labels(Dict("tree_labels" => Int[])) === nothing
+            @test site_configured_tree_labels(Dict("tree_labels" => [1.5])) === nothing
+            @test site_configured_tree_labels(Dict("tree_labels" => "1,2")) === nothing
+        end
+
+        @testset "parse_tree_label_input" begin
+            @test parse_tree_label_input("1,3", 4) == [1, 3]
+            @test parse_tree_label_input("3 1", 4) == [1, 3]          # sorted
+            @test parse_tree_label_input("  2 ,  4 ", 4) == [2, 4]     # whitespace tolerant
+            # Reprompt signals (nothing): empty, non-integer, out-of-range, dup.
+            @test parse_tree_label_input("", 4) === nothing
+            @test parse_tree_label_input("   ", 4) === nothing
+            @test parse_tree_label_input("x", 4) === nothing
+            @test parse_tree_label_input("0", 4) === nothing
+            @test parse_tree_label_input("5", 4) === nothing
+            @test parse_tree_label_input("1,1", 4) === nothing        # duplicate
+        end
+
+        @testset "validate_configured_tree_labels" begin
+            @test validate_configured_tree_labels([1, 3], 4) === nothing
+            @test validate_configured_tree_labels(Int[], 4) !== nothing        # empty
+            @test validate_configured_tree_labels([1, 1], 4) !== nothing       # dup
+            @test validate_configured_tree_labels([5], 4) !== nothing          # OOR
+            @test validate_configured_tree_labels([0], 4) !== nothing          # OOR
+        end
+
+        @testset "render_tree_labels" begin
+            @test render_tree_labels([1]) == "[1]"
+            @test render_tree_labels([1, 3]) == "[1, 3]"
+        end
+
+        @testset "resolve_input_path" begin
+            # Empty / missing → "" (no path).
+            @test resolve_input_path("/base", "") == ""
+            @test resolve_input_path("/base", nothing) == ""
+            # Relative resolves against base_dir; absolute passes through.
+            @test resolve_input_path("/base/dir", "img.jpg") == abspath("/base/dir/img.jpg")
+            @test resolve_input_path("/base", "/abs/img.tif") == "/abs/img.tif"
+        end
+
+        @testset "select_site_input precedence (GeoTIFF-first, image fallback)" begin
+            mktempdir() do dir
+                tif = joinpath(dir, "ortho.tif")
+                jpg = joinpath(dir, "shot.jpg")
+                write(tif, "fake-geotiff-bytes")   # existence is all select_site_input checks
+                write(jpg, "fake-jpeg-bytes")
+
+                # GeoTIFF wins even when an `image` also exists.
+                @test select_site_input(Dict("geotiff" => tif, "image" => jpg), dir) ==
+                      (:geotiff, tif)
+                # GeoTIFF alone.
+                @test select_site_input(Dict("geotiff" => "ortho.tif"), dir) ==
+                      (:geotiff, tif)
+                # No geotiff key → image fallback.
+                @test select_site_input(Dict("image" => "shot.jpg"), dir) ==
+                      (:image, jpg)
+                # geotiff key present but file MISSING → falls back to image.
+                @test select_site_input(Dict("geotiff" => "nope.tif", "image" => jpg), dir) ==
+                      (:image, jpg)
+                # Empty geotiff string → image fallback.
+                @test select_site_input(Dict("geotiff" => "", "image" => "shot.jpg"), dir) ==
+                      (:image, jpg)
+                # Neither readable → :none (site skipped).
+                @test select_site_input(Dict("geotiff" => "x.tif", "image" => "y.jpg"), dir) ==
+                      (:none, "")
+                @test select_site_input(Dict{String,Any}(), dir) == (:none, "")
+            end
+        end
+
+        @testset "stdin_is_tty gates on Base.TTY (Julia 1.12: no Base.isatty)" begin
+            # On Julia 1.12 `Base.isatty` is undefined, so the gate is now
+            # `io isa Base.TTY`. It must return a Bool without throwing, and any
+            # non-TTY stream (a piped/redirected IOBuffer) must be false — this is
+            # the exact gate that decides whether the interactive prompt runs.
+            @test stdin_is_tty() isa Bool                    # default stdin, must not throw
+            @test stdin_is_tty(IOBuffer()) === false         # in-memory stream ≠ TTY
+            @test stdin_is_tty(IOBuffer("1,3\n")) === false
+        end
+
+        @testset "prompt_tree_labels reprompts on invalid input" begin
+            # First two lines invalid (non-int, out-of-range), third valid.
+            input  = IOBuffer("foo\n9\n1,3\n")
+            output = IOBuffer()
+            sel = prompt_tree_labels(4, ["/tmp/k1.png", "/tmp/k2.png"];
+                                     name = "Test Site", suggested = 2,
+                                     in_io = input, out_io = output)
+            @test sel == [1, 3]
+            outstr = String(take!(output))
+            @test occursin("Test Site", outstr)
+            @test occursin("Invalid", outstr)                        # reprompted
+        end
+
+        @testset "prompt_tree_labels errors after max_attempts" begin
+            input  = IOBuffer("bad\nbad\n")
+            output = IOBuffer()
+            @test_throws ErrorException prompt_tree_labels(
+                3, String[]; name = "S", suggested = 1,
+                in_io = input, out_io = output, max_attempts = 2)
+        end
+
+        # -------------------------------------------------------------------
+        # persist_tree_labels — line-preserving, atomic TOML block update
+        # -------------------------------------------------------------------
+        function _with_tmp_config(content::String, f)
+            dir = mktempdir()
+            path = joinpath(dir, "cfg.toml")
+            write(path, content)
+            try
+                f(path)
+            finally
+                rm(dir; recursive = true, force = true)
+            end
+        end
+
+        @testset "persist replaces an existing tree_labels line" begin
+            cfg = """
+            # top comment
+            seed = 6213
+
+            [[site]]
+            name = "OxBow Farm"          # trailing comment kept
+            tree_labels = [1]
+            col_a = "a.png"
+
+            [[site]]
+            name = "Other"
+            col_a = "b.png"
+            """
+            _with_tmp_config(cfg) do path
+                ok, msg = persist_tree_labels(path, "OxBow Farm", [2, 4])
+                @test ok
+                @test msg == ""
+                out = read(path, String)
+                @test occursin("tree_labels = [2, 4]", out)
+                @test !occursin("tree_labels = [1]", out)
+                # Untouched lines preserved byte-for-byte.
+                @test occursin("# top comment", out)
+                @test occursin("name = \"OxBow Farm\"          # trailing comment kept", out)
+                @test occursin("[[site]]\nname = \"Other\"", out)
+                @test occursin("seed = 6213", out)
+            end
+        end
+
+        @testset "persist inserts tree_labels after name when absent" begin
+            cfg = """
+            [[site]]
+            name = "Hubbard Brook"
+            col_a = "hb.png"
+            """
+            _with_tmp_config(cfg) do path
+                ok, _ = persist_tree_labels(path, "Hubbard Brook", [3])
+                @test ok
+                lines = readlines(path)
+                ni = findfirst(l -> occursin("name = \"Hubbard Brook\"", l), lines)
+                @test ni !== nothing
+                @test occursin("tree_labels = [3]", lines[ni + 1])    # right after name
+                @test occursin("col_a = \"hb.png\"", read(path, String))
+            end
+        end
+
+        @testset "persist matches by slug (whitespace/case/punct-insensitive)" begin
+            cfg = """
+            [[site]]
+            name = "Kingman Farm"
+            col_a = "kf.png"
+            """
+            _with_tmp_config(cfg) do path
+                ok, _ = persist_tree_labels(path, "kingman-farm", [2])
+                @test ok
+                @test occursin("tree_labels = [2]", read(path, String))
+            end
+        end
+
+        @testset "persist preserves indentation of replaced line" begin
+            cfg = "[[site]]\n  name = \"Indented\"\n  tree_labels = [1]\n"
+            _with_tmp_config(cfg) do path
+                ok, _ = persist_tree_labels(path, "Indented", [5])
+                @test ok
+                @test occursin("  tree_labels = [5]", read(path, String))
+            end
+        end
+
+        @testset "persist refuses & does not mutate on ambiguous duplicate names" begin
+            cfg = """
+            [[site]]
+            name = "Dup"
+            tree_labels = [1]
+
+            [[site]]
+            name = "Dup"
+            tree_labels = [2]
+            """
+            _with_tmp_config(cfg) do path
+                before = read(path, String)
+                ok, msg = persist_tree_labels(path, "Dup", [3])
+                @test !ok
+                @test occursin("ambiguous", msg)
+                @test read(path, String) == before           # unchanged
+            end
+        end
+
+        @testset "persist reports missing site without mutating" begin
+            cfg = "[[site]]\nname = \"Present\"\n"
+            _with_tmp_config(cfg) do path
+                before = read(path, String)
+                ok, msg = persist_tree_labels(path, "Absent", [1])
+                @test !ok
+                @test occursin("no [[site]] block", msg)
+                @test read(path, String) == before
+            end
+            _with_tmp_config("seed = 1\n") do path            # no [[site]] at all
+                ok, msg = persist_tree_labels(path, "Whatever", [1])
+                @test !ok
+                @test occursin("no [[site]] blocks", msg)
+            end
+        end
+    end
 end

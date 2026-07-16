@@ -334,6 +334,100 @@ function report_cluster_metrics_sweep(metrics::Vector{ClusterMetrics},
 end
 
 """
+    LabelSelectionPreview
+
+Reporting spec that requests a *single* temporary contact-sheet image showing
+every candidate k-medoids cluster as a coloured overlay on the RGB, so a TTY
+operator can pick the vegetation cluster id(s). It is dispatched by
+`report_cluster_overlays` to a method distinct from the legacy per-cluster
+overlay writer. The contact sheet is meant to be transient (deleted by the
+lightweight cross-site runner after the operator selects labels), so it is
+composed as one PNG rather than `k` separate files.
+
+# Fields
+ - `alpha::Float64`: overlay opacity for the highlighted cluster (default 0.55).
+ - `max_preview_px::Int`: per-side thumbnail cap so large orthomosaics do not
+   blow up the render (default `DEFAULT_MAX_PREVIEW_PX`).
+ - `greenness::Union{Nothing,Vector{Float64}}`: optional per-cluster greenness
+   score (−mean CIELAB a*); when supplied the greenest cluster is annotated as a
+   *hint only* in the panel titles.
+"""
+struct LabelSelectionPreview
+    alpha          :: Float64
+    max_preview_px :: Int
+    greenness      :: Union{Nothing, Vector{Float64}}
+end
+LabelSelectionPreview(; alpha::Real = 0.55,
+                        max_preview_px::Integer = DEFAULT_MAX_PREVIEW_PX,
+                        greenness = nothing) =
+    LabelSelectionPreview(Float64(alpha), Int(max_preview_px),
+                          greenness === nothing ? nothing : Float64.(greenness))
+
+"""
+    report_cluster_overlays(spec::LabelSelectionPreview,
+                            img::AbstractMatrix{<:Colorant},
+                            labels::AbstractVector{<:Integer},
+                            k::Integer, out_png::AbstractString) -> String
+
+Compose ONE contact-sheet PNG (a `ceil(√k) × ceil(k/…)` grid of panels) where
+panel `cid` shows the RGB image with cluster `cid` highlighted. Returns the
+saved path.
+
+Label convention: `labels` is the flat per-pixel vector in the SAME order as
+`stack_features`/`labels_to_mask`, i.e. `reshape(labels, H, W)` (column-major;
+row index advances first). This matches the mask actually fed to the KDE, so the
+operator reviews exactly the pixels that will be used — unlike the legacy
+per-cluster `report_cluster_overlays(::GeoRasterStack, …)` method, which reshapes
+row-major for a different (screenshot-derived) code path and is left unchanged.
+"""
+function report_cluster_overlays(spec::LabelSelectionPreview,
+                                 img::AbstractMatrix{<:Colorant},
+                                 labels::AbstractVector{<:Integer},
+                                 k::Integer,
+                                 out_png::AbstractString)
+    H, W = size(img)
+    length(labels) == H * W ||
+        throw(DimensionMismatch("labels length $(length(labels)) ≠ H*W=$(H*W)"))
+    label_img = reshape(labels, H, W)                 # column-major (correct)
+    stride    = _plot_stride(H, W; max_preview_px = spec.max_preview_px)
+    rgb_ds    = _downsample(img, stride)
+    lab_ds    = _downsample(label_img, stride)
+    Hd, Wd    = size(rgb_ds)
+
+    ncol = ceil(Int, sqrt(k))
+    nrow = ceil(Int, k / ncol)
+    palette = ColorSchemes.tab10
+
+    fig = Figure(size = (max(320, 300 * ncol), max(260, 260 * nrow + 40)),
+                 backgroundcolor = :white)
+    Label(fig[0, 1:ncol],
+          "Cluster candidates (k=$k) — pick vegetation id(s)";
+          fontsize = 15, font = :bold)
+    for cid in 1:k
+        r = fld(cid - 1, ncol) + 1
+        c = mod(cid - 1, ncol) + 1
+        hint = if spec.greenness !== nothing && length(spec.greenness) == k
+            cid == argmax(spec.greenness) ? "  [greenest — hint]" : ""
+        else
+            ""
+        end
+        ax = Axis(fig[r, c]; title = "cluster $cid$hint",
+                  aspect = DataAspect(), yreversed = true)
+        hidedecorations!(ax)
+        image!(ax, permutedims(rgb_ds, (2, 1)))
+        col = palette[mod1(cid, length(palette))]
+        overlay = fill(RGBA(col.r, col.g, col.b, 0.0), Hd, Wd)
+        @inbounds for j in 1:Hd, i in 1:Wd
+            lab_ds[j, i] == cid && (overlay[j, i] = RGBA(col.r, col.g, col.b, spec.alpha))
+        end
+        image!(ax, permutedims(overlay, (2, 1)))
+    end
+    mkpath(dirname(abspath(out_png)))
+    CairoMakie.save(out_png, fig; px_per_unit = 2)
+    return out_png
+end
+
+"""
     report_cluster_overlays(rs::GeoRasterStack, labels::AbstractVector{<:Integer},
                             k::Integer, outdir; alpha=0.55) -> [paths]
 
