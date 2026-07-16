@@ -176,6 +176,18 @@ function _placeholder!(fig, cell, label::AbstractString)
     return ax
 end
 
+# Rotated site-name gutter. A `Label` with `rotation` inside a fixed narrow
+# GridLayout column does not render reliably on this Makie version, so draw the
+# name via `text!` in a blank, spine-free axis whose data box fills the cell.
+function _render_row_label!(fig, cell, name::AbstractString)
+    ax = Axis(fig[cell...]; backgroundcolor = :transparent)
+    hidedecorations!(ax); hidespines!(ax)
+    xlims!(ax, 0, 1); ylims!(ax, 0, 1)
+    text!(ax, 0.5, 0.5; text = String(name), align = (:center, :center),
+          rotation = pi/2, fontsize = 14, font = :bold, color = COL_L1)
+    return ax
+end
+
 # image!(ax, xr, yr, M): M is indexed [x, y]; our rasters are (H, W)=(y, x), so
 # permute to (W, H). Combined with yreversed the picture reads north-up.
 _for_image(M::AbstractMatrix) = permutedims(M, (2, 1))
@@ -230,7 +242,7 @@ end
 # Panel composition
 # ---------------------------------------------------------------------------
 
-const LAB_COL_W = 46   # width (pt) of the rotated site-label gutter
+const LAB_COL_W = 58   # width (pt) of the rotated site-label gutter
 
 """
     make_cross_site_panel(cfg; out_path, dpi=300) -> out_path
@@ -260,10 +272,7 @@ function make_cross_site_panel(cfg::PanelConfig;
     kde_heatmap = nothing
     for (r, site) in enumerate(cfg.sites)
         row = HEADER_ROW + r
-        Label(fig[row, LAB_COL], site.name;
-              fontsize = 13, font = :bold, rotation = pi/2,
-              halign = :center, valign = :center,
-              color = COL_L1, tellheight = false)
+        _render_row_label!(fig, (row, LAB_COL), site.name)
 
         _render_site!(fig,  (row, COL_A), site)
         _render_label!(fig, (row, COL_B), site, cfg)
@@ -285,8 +294,11 @@ function make_cross_site_panel(cfg::PanelConfig;
 
     colsize!(fig.layout, LAB_COL, Fixed(LAB_COL_W))
     colsize!(fig.layout, CB_COL,  Fixed(70))
+    # Split the width LEFT OVER by the fixed gutter/colorbar equally among the
+    # three image columns. `Relative(1/3)` would instead claim the full figure
+    # width, collapsing the fixed label gutter to zero (labels then vanish).
     for c in (COL_A, COL_B, COL_C)
-        colsize!(fig.layout, c, Relative(1.0 / 3))
+        colsize!(fig.layout, c, Auto(false, 1.0))
     end
     rowgap!(fig.layout, 8)
     colgap!(fig.layout, 8)
