@@ -99,6 +99,63 @@ end
     @test d0.k_range == (2, 6) && d0.cluster_stride == 1
 end
 
+@testset "runner helpers: display-ready PNG previews (non-black + categorical)" begin
+    # Categorical raster whose RAW values (ids 1..3) would render near-black in a
+    # naive viewer; the styled preview must be bright and per-cluster distinct.
+    H, W = 6, 9
+    labels = [ (i <= W ÷ 3) ? 1 : (i <= 2W ÷ 3 ? 2 : 3) for j in 1:H, i in 1:W ]
+    li = RunnerHelpers.render_label_png(labels, 3)
+    @test size(li) == (H, W)
+    intensity(c) = (Float64(c.r) + Float64(c.g) + Float64(c.b)) / 3
+    @test all(intensity(c) > 0.05 for c in li)              # nothing near-black
+    @test length(unique(li)) == 3                            # one colour per cluster
+    # The three cluster colours are mutually distinct.
+    cols = [ li[1, 1], li[1, W ÷ 3 + 1], li[1, W - 1] ]
+    @test length(unique(cols)) == 3
+    # nodata id (0) falls back to the neutral background, not a cluster colour.
+    l0 = RunnerHelpers.render_label_png([0 1; 2 3], 3)
+    @test l0[1, 1] == RunnerHelpers._PREVIEW_BG
+
+    # Binary mask → veg is the orange highlight, background is dark grey; the
+    # background is deliberately above the near-black threshold so 0/1 rasters
+    # never read as an all-black image.
+    veg = [1 0; 0 1]
+    mi = RunnerHelpers.render_mask_png(veg)
+    @test mi[1, 1] == RunnerHelpers._MASK_VEG_COLOR
+    @test mi[1, 2] == RunnerHelpers._PREVIEW_BG
+    @test all(intensity(c) > 0.05 for c in mi)
+
+    # KDE preview: fixed [0,1] viridis ramp — low ≠ high, both non-black-ish,
+    # and out-of-range / non-finite inputs are clamped rather than throwing.
+    ki = RunnerHelpers.render_kde_png([0.0 0.5 1.0; NaN -0.2 1.7])
+    @test size(ki) == (2, 3)
+    @test ki[1, 1] != ki[1, 3]                               # 0.0 and 1.0 differ
+    @test all(isfinite(intensity(c)) for c in ki)
+end
+
+# Real user-supplied KDE GeoTIFF (the artifact from the black-output report):
+# a valid [0,1] Float64 surface that renders perfectly once styled. Guarded by
+# isfile so the suite stays portable when the artifact is absent.
+@testset "real uploaded KDE GeoTIFF reads valid + renders non-black" begin
+    candidates = filter(isfile, [
+        get(ENV, "UPLOADED_KDE_TIF", ""),
+        "/home/user/workspace/uploaded_attachments/3812b92b615448a7bc25b567ba0613f7/kde_surface.tif",
+    ])
+    if isempty(candidates)
+        @test_skip true    # artifact not present in this environment
+    else
+        Z, gt, crs = read_band(first(candidates))
+        finite = filter(isfinite, vec(Float64.(Z)))
+        @test !isempty(finite)
+        @test minimum(finite) ≥ -1e-9 && maximum(finite) ≤ 1 + 1e-9
+        @test !isempty(crs)                                  # georeferenced
+        @test gt.dx != 0                                     # real geotransform
+        img = RunnerHelpers.render_kde_png(Float64.(Z))
+        intensity(c) = (Float64(c.r) + Float64(c.g) + Float64(c.b)) / 3
+        @test count(c -> intensity(c) > 0.05, img) / length(img) > 0.5
+    end
+end
+
 # ===========================================================================
 # 2. End-to-end runner + composer (subprocess; cross-process determinism)
 # ===========================================================================
@@ -127,8 +184,9 @@ end
             sd = joinpath(prod1, s)
             @test isdir(sd)
             @test Set(readdir(sd)) == Set([
-                "label_clusters.tif", "vegetation_mask.tif",
-                "kde_surface.tif", "products_metadata.json"])
+                "label_clusters.tif", "vegetation_mask.tif", "kde_surface.tif",
+                "label_clusters.png", "vegetation_mask.png", "kde_surface.png",
+                "products_metadata.json"])
         end
     end
 
@@ -168,6 +226,30 @@ end
             finite = filter(isfinite, vec(Float64.(Zk)))
             @test minimum(finite) ≥ -1e-9 && maximum(finite) ≤ 1 + 1e-9
             @test isapprox(maximum(finite), 1.0; atol = 1e-6)     # min-max hits 1
+        end
+    end
+
+    @testset "display-ready PNG previews written, non-black, in metadata" begin
+        using FileIO
+        intensity(c) = (Float64(c.r) + Float64(c.g) + Float64(c.b)) / 3
+        for s in slugs
+            sd   = joinpath(prod1, s)
+            meta = JSON.parsefile(joinpath(sd, "products_metadata.json"))
+            # Previews are recorded in metadata alongside the scientific rasters.
+            @test meta["previews"]["label_clusters"]  == "label_clusters.png"
+            @test meta["previews"]["vegetation_mask"] == "vegetation_mask.png"
+            @test meta["previews"]["kde_surface"]     == "kde_surface.png"
+            for png in ("label_clusters.png", "vegetation_mask.png", "kde_surface.png")
+                p = joinpath(sd, png)
+                @test isfile(p)
+                img = FileIO.load(p)
+                # A truthful preview is NOT a near-black image (the raw
+                # categorical rasters would be); require a bright majority.
+                bright = count(c -> intensity(c) > 0.05, img) / length(img)
+                @test bright > 0.5
+            end
+            # KDE preview shows real spread (not a flat single colour).
+            @test length(unique(FileIO.load(joinpath(sd, "kde_surface.png")))) > 5
         end
     end
 

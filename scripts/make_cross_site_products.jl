@@ -13,7 +13,15 @@ geospatial products needed to compose the 3-column cross-site figure
         label_clusters.tif      Int32   per-pixel k-medoids cluster id  (nodata 0)
         vegetation_mask.tif     UInt8   selected-vegetation 0/1 mask    (nodata 255)
         kde_surface.tif         Float64 min-max-normalised [0,1] KDE    (nodata NaN)
+        label_clusters.png              styled categorical-palette preview
+        vegetation_mask.png             styled binary highlight preview
+        kde_surface.png                 styled viridis [0,1] preview
         products_metadata.json          compact reproducibility record
+
+The *.tif rasters carry the scientific values (tiny integer ids / [0,1] floats)
+for downstream computation; the *.png previews exist purely so operators can eye
+each product without a viewer's raw-value autostretch turning categorical
+rasters near-black. Previews never feed back into any computation.
 
 It DOES NOT write speed maps, waypoints, waypoint CSVs, cluster overlays,
 histograms, manifests, or a run-report bundle — that is the heavy
@@ -80,6 +88,8 @@ Pkg.activate(joinpath(@__DIR__, ".."))
 
 using KDEFlightPlanning
 using Colors: RGB
+import Colors
+import ColorSchemes
 using Statistics: mean
 using TOML
 using JSON
@@ -136,11 +146,14 @@ settings_digest(seed, nsample, k_range, stride) =
 # ---------------------------------------------------------------------------
 
 struct ProductPaths
-    dir      :: String
-    label    :: String
-    mask     :: String
-    kde      :: String
-    metadata :: String
+    dir       :: String
+    label     :: String
+    mask      :: String
+    kde       :: String
+    label_png :: String
+    mask_png  :: String
+    kde_png   :: String
+    metadata  :: String
 end
 
 function product_paths(out_dir::AbstractString, site_name::AbstractString)
@@ -149,8 +162,47 @@ function product_paths(out_dir::AbstractString, site_name::AbstractString)
         joinpath(dir, "label_clusters.tif"),
         joinpath(dir, "vegetation_mask.tif"),
         joinpath(dir, "kde_surface.tif"),
+        joinpath(dir, "label_clusters.png"),
+        joinpath(dir, "vegetation_mask.png"),
+        joinpath(dir, "kde_surface.png"),
         joinpath(dir, "products_metadata.json"))
 end
+
+# ---------------------------------------------------------------------------
+# Display-ready PNG previews
+# ---------------------------------------------------------------------------
+#
+# The GeoTIFFs above are *scientific* rasters: label ids 1..k (nodata 0), a 0/1
+# mask (nodata 255) and a [0,1] Float64 KDE (nodata NaN). Their raw pixel values
+# are tiny integers / normalised floats, so a naive viewer or a direct
+# TIFF→JPEG export renders them near-black (categorical value 1 out of 255 ≈
+# black). To give operators a truthful at-a-glance preview WITHOUT inflating the
+# raw raster values, we additionally emit an explicitly styled PNG per product:
+# a categorical palette for the labels, a binary highlight for the mask, and a
+# viridis ramp with a fixed [0,1] range for the KDE.
+
+const _MASK_VEG_COLOR = RGB{Float64}(1.0, 0.42745, 0.0)   # #FF6D00 (matches panel)
+const _PREVIEW_BG     = RGB{Float64}(0.12, 0.12, 0.12)    # nodata / background
+
+"""Deterministic, high-contrast categorical palette for cluster ids 1..k."""
+_categorical_palette(k::Int) =
+    RGB{Float64}.(Colors.distinguishable_colors(k + 1, [_PREVIEW_BG])[2:end])
+
+"""Cluster-id raster (H×W, ids 1..k; 0 = nodata) → RGB preview matrix."""
+function render_label_png(labels_img::AbstractMatrix{<:Integer}, k::Int)
+    palette = _categorical_palette(k)
+    map(v -> (1 <= v <= k) ? palette[v] : _PREVIEW_BG, labels_img)
+end
+
+"""0/1 vegetation mask → RGB preview (veg = orange highlight, else dark grey)."""
+render_mask_png(veg::AbstractMatrix{<:Integer}) =
+    map(v -> v == 1 ? _MASK_VEG_COLOR : _PREVIEW_BG, veg)
+
+"""[0,1] normalised KDE surface → viridis RGB preview (fixed [0,1] range)."""
+render_kde_png(Zn::AbstractMatrix{<:Real}) =
+    map(x -> RGB{Float64}(ColorSchemes.get(ColorSchemes.viridis,
+                                           isfinite(x) ? clamp(x, 0.0, 1.0) : 0.0)),
+        Zn)
 
 # ---------------------------------------------------------------------------
 # Geotransform scaling for a stride-decimated grid
@@ -363,6 +415,11 @@ function process_site(site, defaults::SiteDefaults, out_dir::AbstractString,
     write_single_band_geotiff(pp.kde, Zn, product_gt, crs;
                               dtype = Float64, nodata = NaN)
 
+    # --- Display-ready PNG previews (styled; raw rasters untouched) -------
+    FileIO.save(pp.label_png, render_label_png(reshape(labels_full, H, W), k))
+    FileIO.save(pp.mask_png,  render_mask_png(veg))
+    FileIO.save(pp.kde_png,   render_kde_png(Zn))
+
     # --- Compact reproducibility metadata --------------------------------
     metadata = Dict{String,Any}(
         "site_name"        => name,
@@ -390,6 +447,11 @@ function process_site(site, defaults::SiteDefaults, out_dir::AbstractString,
             "vegetation_mask" => basename(pp.mask),
             "kde_surface"     => basename(pp.kde),
         ),
+        "previews" => Dict(
+            "label_clusters"  => basename(pp.label_png),
+            "vegetation_mask" => basename(pp.mask_png),
+            "kde_surface"     => basename(pp.kde_png),
+        ),
         "julia_version"    => string(VERSION),
         "generated_at"     => string(Dates.now()),
     )
@@ -398,7 +460,8 @@ function process_site(site, defaults::SiteDefaults, out_dir::AbstractString,
     end
 
     println("  products:")
-    for p in (pp.label, pp.mask, pp.kde, pp.metadata)
+    for p in (pp.label, pp.mask, pp.kde,
+              pp.label_png, pp.mask_png, pp.kde_png, pp.metadata)
         @printf("    %-22s %d bytes\n", basename(p), filesize(p))
     end
     return pp
