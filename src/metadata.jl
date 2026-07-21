@@ -20,8 +20,13 @@ Two responsibilities:
      the orthomosaic thumbnail and **errors** with a clear message if
      `tree_labels` is not provided.  This is the path used in automated
      tests and CI.
-   - An *interactive* mode (requires a TTY) that cycles through overlays
-     and prompts the user to select vegetation clusters.
+   - An *interactive* mode (requires a TTY) that renders overlays and prompts
+     the user to select vegetation clusters, reprompting until the input is a
+     nonempty set of unique, in-range cluster ids.
+
+   `build_mask_autok` reuses this interactive capability via
+   `resolve_autok_tree_labels` (explicit labels → prompt on a TTY → clear error
+   when non-interactive) rather than duplicating a selection loop.
 
 ## Usage (non-interactive / CI)
 
@@ -327,59 +332,194 @@ AutomaticTreeLabelRequired$ctx:
 end
 
 """
+    parse_cluster_id_input(line, available_ks) -> Union{Vector{Int}, Nothing}
+
+Parse a comma/whitespace-separated list of cluster ids. Returns a sorted vector
+of unique integers, each contained in `available_ks`, or `nothing` (the reprompt
+signal) when the input is empty, contains a non-integer, has an id outside
+`available_ks`, or contains duplicates.
+
+This is the canonical validation used by `interactive_tree_labels`; it mirrors
+the pure `parse_tree_label_input` helper in `scripts/tree_label_selection.jl`
+so the library and the cross-site producer share identical accept/reject rules.
+"""
+function parse_cluster_id_input(line::AbstractString,
+                                available_ks::AbstractVector{<:Integer})
+    toks = [t for t in split(line, r"[,\s]+") if !isempty(t)]
+    isempty(toks) && return nothing
+    labs = Int[]
+    for t in toks
+        v = tryparse(Int, t)
+        v === nothing && return nothing
+        (v in available_ks) || return nothing
+        push!(labs, v)
+    end
+    length(unique(labs)) == length(labs) || return nothing   # reject duplicates
+    return sort(labs)
+end
+
+"""
+    validate_tree_labels(labels, available_ks; context="") -> Vector{Int}
+
+Return a sorted, de-duplicated `Vector{Int}` of `labels` after asserting they
+are a nonempty set of unique ids, each contained in `available_ks`. Throws an
+`ErrorException` (with `context` in the message) otherwise. Used to reject an
+out-of-range/empty/duplicate selection returned by an interactive prompt or an
+injected `label_selector` before it can reach `labels_to_mask`.
+"""
+function validate_tree_labels(labels, available_ks::AbstractVector{<:Integer};
+                              context::AbstractString="")
+    ctx = isempty(context) ? "" : " ($context)"
+    labels === nothing && error("tree_labels must not be `nothing`$ctx.")
+    labs = try
+        Int.(collect(labels))
+    catch
+        error("tree_labels$ctx must be integer cluster ids; got $(labels).")
+    end
+    isempty(labs) && error("tree_labels$ctx must be a nonempty set of cluster ids.")
+    length(unique(labs)) == length(labs) ||
+        error("tree_labels$ctx has duplicate ids: $labs.")
+    bad = filter(v -> !(v in available_ks), labs)
+    isempty(bad) ||
+        error("tree_labels$ctx $bad are not valid cluster ids " *
+              "(available clusters: $(collect(available_ks))).")
+    return sort(unique(labs))
+end
+
+"""
     interactive_tree_labels(img, labels_full::AbstractVector{Int}, H::Int, W::Int;
                              out_dir::AbstractString = "output/cluster_overlays",
-                             prefix ::AbstractString = "cluster")
+                             prefix ::AbstractString = "cluster",
+                             k::Union{Nothing,Integer} = nothing,
+                             in_io::IO = stdin, out_io::IO = stdout,
+                             is_tty::Union{Nothing,Bool} = nothing,
+                             max_attempts::Integer = 100)
         -> Vector{Int}
 
 Interactive workflow (requires a TTY) for selecting vegetation cluster labels.
 
 Steps:
-1. Saves one PNG overlay per cluster to `out_dir`.
-2. Prompts the user to enter comma-separated cluster numbers for vegetation.
-3. Returns the confirmed `Vector{Int}` of tree labels.
+1. Saves one PNG overlay per cluster to `out_dir` (previewable review artefacts).
+2. Prompts the user to enter comma/whitespace-separated cluster ids for
+   vegetation, **reprompting** until the input parses to a nonempty set of
+   unique ids within the available clusters (`parse_cluster_id_input`).
+3. Returns the confirmed, sorted `Vector{Int}` of tree labels.
+
+Seams for testing / non-interactive callers
+--------------------------------------------
+- `in_io` / `out_io`: redirect the prompt loop to in-memory buffers.
+- `is_tty`: override the TTY check (defaults to `Base.isatty(stdin)`); pass
+  `true` in tests that drive `in_io` with a scripted `IOBuffer`.
+- `max_attempts`: bound the reprompt loop so tests can never block.
 
 Falls back gracefully in non-TTY environments by printing instructions and
-returning an empty vector (caller should then call `require_tree_labels`).
+returning an empty vector (caller should then call `require_tree_labels` or, as
+`build_mask_autok` does, raise a descriptive error).
 """
 function interactive_tree_labels(img, labels_full::AbstractVector{Int},
                                   H::Int, W::Int;
                                   out_dir::AbstractString = "output/cluster_overlays",
-                                  prefix ::AbstractString = "cluster")
+                                  prefix ::AbstractString = "cluster",
+                                  k::Union{Nothing,Integer} = nothing,
+                                  in_io::IO = stdin, out_io::IO = stdout,
+                                  is_tty::Union{Nothing,Bool} = nothing,
+                                  max_attempts::Integer = 100)
     written = save_cluster_overlays(img, labels_full, H, W;
                                      out_dir=out_dir, prefix=prefix)
 
     ks = sort(unique(labels_full))
-    println("\nCluster overlay PNGs written:")
-    for p in written; println("  $p"); end
-    println("\nAvailable clusters: $(ks)")
-    println("Enter comma-separated cluster numbers for VEGETATION/TREES (e.g. 2,4): ")
+    println(out_io, "\nCluster overlay previews written:")
+    for p in written; println(out_io, "  $p"); end
+    kmax = k === nothing ? (isempty(ks) ? 0 : maximum(ks)) : Int(k)
+    println(out_io, "\nAvailable clusters: $(ks)  (chosen k = $kmax)")
 
-    if !Base.isatty(stdin)
+    tty = is_tty === nothing ? Base.isatty(stdin) : is_tty
+    if !tty
         @warn "interactive_tree_labels: stdin is not a TTY. " *
               "Returning empty tree_labels. " *
               "Call require_tree_labels() to validate before proceeding."
         return Int[]
     end
 
-    line = strip(readline())
-    if isempty(line)
-        @warn "No labels entered. Returning empty tree_labels."
-        return Int[]
+    attempts = 0
+    while attempts < max_attempts
+        attempts += 1
+        print(out_io, "Enter vegetation cluster id(s), comma-separated (e.g. 2,4): ")
+        flush(out_io)
+        line = readline(in_io)
+        sel = parse_cluster_id_input(line, ks)
+        if sel === nothing
+            println(out_io, "  ✗ Invalid — expected unique cluster ids drawn from $ks. Try again.")
+            continue
+        end
+        println(out_io, "  ✓ Selected vegetation labels = $sel")
+        return sel
+    end
+    error("interactive_tree_labels: no valid selection after $max_attempts attempts.")
+end
+
+"""
+    resolve_autok_tree_labels(tree_labels, img, labels_full, k, H, W;
+                              interactive::Bool = true,
+                              is_tty::Bool = Base.isatty(stdin),
+                              label_selector = nothing,
+                              overlay_outdir::AbstractString = "output/cluster_overlays")
+        -> Vector{Int}
+
+Canonical vegetation-label resolution for `build_mask_autok`, applied **after**
+clustering (so `k` and `labels_full` are known). There is NO silent default:
+
+1. **Explicit, nonempty `tree_labels`** → validated against the available
+   clusters and returned verbatim (no prompt; deterministic / CI-safe).
+2. **Absent (`nothing`/empty) + interactive TTY** → the cluster overlays are
+   generated and the user selects vegetation id(s) via `label_selector`
+   (default: `interactive_tree_labels`, which reprompts until valid). The result
+   is validated (nonempty, unique, in-range) and returned.
+3. **Absent + non-interactive / non-TTY** → an `ErrorException` with actionable
+   instructions to pass `tree_labels`. The greenest/`[1]` cluster is never
+   guessed.
+
+`label_selector`, when supplied, is called as
+`label_selector(img, labels_full, H, W, k)` and must return the selected ids;
+its result is validated the same way (an out-of-range/empty result is rejected).
+This seam lets tests inject a deterministic selector and TTY predicate.
+"""
+function resolve_autok_tree_labels(tree_labels, img,
+                                    labels_full::AbstractVector{<:Integer},
+                                    k::Integer, H::Integer, W::Integer;
+                                    interactive::Bool = true,
+                                    is_tty::Bool = Base.isatty(stdin),
+                                    label_selector = nothing,
+                                    overlay_outdir::AbstractString = "output/cluster_overlays")
+    ks = sort(unique(Int.(labels_full)))
+
+    # (1) Explicit, nonempty labels: validate and use verbatim (no prompt).
+    if tree_labels !== nothing && !isempty(tree_labels)
+        return validate_tree_labels(tree_labels, ks; context="configured tree_labels")
     end
 
-    chosen = Int[]
-    for tok in split(line, ',')
-        tok2 = strip(tok)
-        isempty(tok2) && continue
-        try
-            k = parse(Int, tok2)
-            k in ks || @warn "Cluster $k not in available clusters $ks"
-            push!(chosen, k)
-        catch
-            @warn "Could not parse '$tok2' as an integer — skipping."
-        end
+    # (2)/(3) Labels genuinely absent.
+    if !(interactive && is_tty)
+        error("""
+        NoTreeLabelsAndNonInteractive:
+
+          Clustering finished (chosen k = $k, clusters $ks) but no vegetation
+          `tree_labels` were provided and stdin is not an interactive TTY.
+          build_mask_autok will NOT guess which cluster is vegetation.
+
+          Do one of:
+            1. Re-run passing explicit labels, e.g.
+                 build_mask_autok(path; tree_labels=[2, 4])
+               (valid ids are the cluster numbers listed above); or
+            2. Re-run in an interactive terminal to review the per-cluster
+               overlays under `$overlay_outdir` and select the vegetation
+               cluster(s) at the prompt.
+        """)
     end
-    println("Selected vegetation labels: $chosen")
-    return chosen
+
+    sel = label_selector === nothing ?
+        interactive_tree_labels(img, Int.(labels_full), Int(H), Int(W);
+                                out_dir=overlay_outdir, k=k, is_tty=true) :
+        label_selector(img, labels_full, H, W, k)
+    return validate_tree_labels(sel, ks; context="interactive selection")
 end

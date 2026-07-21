@@ -470,10 +470,17 @@ function report_cluster_overlays(rs::GeoRasterStack,
         title = "Cluster $cid overlay (alpha=$(alpha))" *
                 (stride > 1 ? "  [thumbnail stride=$stride]" : "")
         ax = if use_geo
+            # Makie 1.12 requires ascending axis limits; a geotransform with
+            # positive dy yields ymin > ymax and would raise "Invalid y-limits".
+            # Sort limits robustly and, when the raw y-extent was descending,
+            # flip the axis with `yreversed` so raster row 1 stays at the top.
+            xlo, xhi = minmax(ex.xmin, ex.xmax)
+            ylo, yhi = minmax(ex.ymin, ex.ymax)
             Axis(fig[1, 1]; title = title,
                  xlabel = "Easting (m)", ylabel = "Northing (m)",
                  aspect = DataAspect(),
-                 limits = (ex.xmin, ex.xmax, ex.ymin, ex.ymax))
+                 yreversed = ex.ymin > ex.ymax,
+                 limits = (xlo, xhi, ylo, yhi))
         else
             Axis(fig[1, 1]; title = title,
                  aspect = DataAspect(), yreversed = true)

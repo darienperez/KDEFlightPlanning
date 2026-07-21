@@ -1,5 +1,10 @@
 # Generated pipeline artefacts
 /output/
+output/
+
+# Large site inputs (orthomosaics / site imagery) are not tracked; keep the
+# small text summaries under data/ground_truth/ which tests and scripts use.
+data/site_images/
 
 # Julia local / build artefacts
 /LocalPreferences.toml
