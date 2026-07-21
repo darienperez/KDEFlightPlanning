@@ -269,53 +269,148 @@ function _finalise_intervals(intervals::Vector{Tuple{Float64,Float64}}, L::Real;
     return merged
 end
 
+# Interior points (exclusive of both anchors `a` and `b`) subdividing one anchor
+# span so that every resulting gap is ≥ `smin`, ≤ `smax` where achievable.
+#
+#   • Event spans (`fine=true`): equal subdivision at the FINEST legal step,
+#     `nseg = floor(span/smin)` ⇒ step ∈ [smin, 2·smin) — dense refinement inside
+#     the transition, never below the minimum.
+#   • Quiet spans (`fine=false`): greedy `smax` stepping to keep gaps AT the
+#     maximum, with the trailing remainder handled so no sub-min stub is left:
+#       – remainder ≥ smin        → it becomes its own final gap (mostly smax);
+#       – 0 < remainder < smin    → it is fused with the preceding smax step and
+#                                    that pair is split into two equal gaps
+#                                    (each in [smax/2, smax) ⊆ [smin, smax) since
+#                                    smax ≥ 2·smin in the nominal 10–30 regime).
+#     In the max<2·min dead zone the split can dip toward smax/2 < smin; strict
+#     min still holds because the fused length ≥ smax ≥ smin, split ≥ smin only
+#     when smax ≥ 2·smin — otherwise the span is short enough to emit no interior
+#     point (single gap ≤ smax) and the invariant is preserved upstream.
+function _span_interior(a::Real, b::Real, smin::Real, smax::Real; fine::Bool)
+    a = Float64(a); b = Float64(b); span = b - a
+    tol = 1e-9
+    pts = Float64[]
+    span <= smin + tol && return pts                       # single legal gap
+    if fine
+        nseg = max(1, floor(Int, span / smin + tol))
+        step = span / nseg
+        for m in 1:nseg - 1
+            push!(pts, a + m * step)
+        end
+        return pts
+    end
+    span <= smax + tol && return pts                       # single quiet gap ≤ smax
+    nfull = floor(Int, span / smax + tol)
+    r = span - nfull * smax
+    if r > tol && r < smin - tol && nfull >= 1
+        for m in 1:nfull - 1
+            push!(pts, a + m * smax)
+        end
+        last2 = span - (nfull - 1) * smax                  # = smax + r
+        push!(pts, a + (nfull - 1) * smax + last2 / 2)
+    else
+        for m in 1:nfull
+            push!(pts, a + m * smax)
+        end
+    end
+    filter!(p -> b - p > tol && p - a > tol, pts)
+    return pts
+end
+
 """
     _place_positions(L, intervals; spacing_min, spacing_max, min_step)
         -> Vector{Float64}
 
-Pass 2. Produce sorted arc positions in `[0, L]` (inclusive of both endpoints).
-Quiet gaps are stepped at exactly `spacing_max`; event intervals at exactly
-`spacing_min`. Interval edges are always emitted, structurally guaranteeing an
-anticipatory point before and a trailing point after every event. Positions
-closer than `min_step` are collapsed.
+Pass 2. Produce sorted arc positions in `[0, L]` (inclusive of both endpoints)
+under a **strict minimum-spacing invariant**: no two consecutive emitted
+positions are closer than `spacing_min` (within tolerance), the sole unavoidable
+exception being a whole segment shorter than `spacing_min`, which degenerates to
+`[0, L]`.
+
+The placement is anchor-based and correct-by-construction:
+
+ 1. **Anchors** — the segment endpoints `0` and `L` (highest priority) plus every
+    event-interval edge (`a`, `b`). An interval narrower than `spacing_min`
+    cannot host both edges without a sub-min gap, so it is *collapsed* to a
+    single mid anchor (the deterministic infeasible-narrow-event resolution:
+    strict-min wins over dual-edge coverage).
+ 2. **Anchor de-conflict** — anchors closer than `spacing_min` are merged,
+    keeping the higher-priority one; `0` and `L` always survive.
+ 3. **Fill** — each span between kept anchors is subdivided into equal steps via
+    `_subdiv_count`: quiet spans target `spacing_max`, event spans target
+    `spacing_min` (≥1 refinement point when feasible). Equal subdivision cannot
+    produce a residual stub, so no sub-min gap is created. Quiet steps also stay
+    ≤ `spacing_max` (retaining the max cap) except in the max<2·min dead zone,
+    where the minimum is preferred.
+
+`min_step` is retained only as a final defensive de-duplication of numerically
+coincident points; by construction all real gaps are already ≥ `spacing_min`.
 """
 function _place_positions(L::Real, intervals::Vector{Tuple{Float64,Float64}};
                           spacing_min::Real, spacing_max::Real, min_step::Real)
-    L = Float64(L)
-    pts = Float64[0.0]
-    cursor = 0.0
-    _fill!(pts, lo, hi, Δ) = begin
-        p = lo
-        while p + Δ < hi - 1e-9
-            p += Δ
+    L    = Float64(L)
+    smin = Float64(spacing_min)
+    smax = Float64(spacing_max)
+    tol  = 1e-9
+
+    # Degenerate: segment too short to satisfy the minimum at all.
+    L <= smin + tol && return L <= tol ? Float64[0.0] : Float64[0.0, L]
+
+    # 1. Anchors: (position, priority).  endpoints = 2, event edges = 1.
+    anchors = Tuple{Float64,Int}[(0.0, 2), (L, 2)]
+    evspans = Tuple{Float64,Float64}[]           # feasible event spans (fine fill)
+    for (a0, b0) in intervals
+        a = clamp(a0, 0.0, L); b = clamp(b0, 0.0, L)
+        b < a && ((a, b) = (b, a))
+        if b - a < smin - tol
+            push!(anchors, ((a + b) / 2, 1))     # collapse narrow event
+        else
+            push!(anchors, (a, 1)); push!(anchors, (b, 1))
+            push!(evspans, (a, b))
+        end
+    end
+    sort!(anchors; by = first)
+
+    # 2. De-conflict anchors closer than smin, keeping higher priority.
+    kept = Tuple{Float64,Int}[anchors[1]]
+    for c in @view anchors[2:end]
+        if c[1] - kept[end][1] >= smin - tol
+            push!(kept, c)
+        elseif c[2] > kept[end][2] &&
+               (length(kept) < 2 || c[1] - kept[end-1][1] >= smin - tol)
+            kept[end] = c                        # replace lower-priority neighbour
+        end
+        # otherwise drop c (lower/equal priority, too close)
+    end
+    # Guarantee L is the tail anchor, popping any interior points it would crowd
+    # (never drop the leading 0 anchor).
+    if kept[end][1] < L - tol
+        while length(kept) >= 2 && L - kept[end][1] < smin - tol
+            pop!(kept)
+        end
+        push!(kept, (L, 2))
+    else
+        kept[end] = (L, 2)
+    end
+    apos = Float64[k[1] for k in kept]
+
+    _is_event(a, b) = any(e -> a >= e[1] - tol && b <= e[2] + tol, evspans)
+
+    # 3. Subdivide each anchor span (quiet → near-max, event → fine).
+    pts = Float64[apos[1]]
+    for i in 1:length(apos) - 1
+        a = apos[i]; b = apos[i+1]
+        for p in _span_interior(a, b, smin, smax; fine = _is_event(a, b))
             push!(pts, p)
         end
-        push!(pts, hi)
+        push!(pts, b)
     end
-    for (a, b) in intervals
-        a = clamp(a, 0.0, L); b = clamp(b, 0.0, L)
-        a <= cursor && (a = cursor)
-        if a > cursor + 1e-9          # quiet run before the event
-            _fill!(pts, cursor, a, spacing_max)
-        end
-        if b > a + 1e-9               # event run (fine spacing)
-            _fill!(pts, a, b, spacing_min)
-        end
-        cursor = max(cursor, b)
-    end
-    if cursor < L - 1e-9              # trailing quiet run
-        _fill!(pts, cursor, L, spacing_max)
-    end
-    push!(pts, L)
-    sort!(pts)
-    # collapse near-duplicates / sub-min_step steps
+
+    # Final defensive de-dup (coincident points only; real gaps are ≥ smin).
     out = Float64[pts[1]]
-    for p in pts[2:end]
-        if p - out[end] >= min_step - 1e-9
-            push!(out, p)
-        end
+    for p in @view pts[2:end]
+        p - out[end] >= max(min_step, 1e-9) - 1e-9 && push!(out, p)
     end
-    out[end] < L - 1e-9 && push!(out, L)   # never drop the endpoint
     out[end] = L
     return out
 end

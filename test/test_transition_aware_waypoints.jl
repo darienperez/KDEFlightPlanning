@@ -243,4 +243,142 @@ end
         @test maximum(gaps) > 20.0 + 1e-6      # would be impossible if struct 20 won
         @test all(g -> g >= 10.0 - 1e-6, gaps[1:end-1])  # min honoured (interior)
     end
+
+    # -----------------------------------------------------------------------
+    # 7. STRICT MINIMUM SPACING INVARIANT
+    #     No two consecutive EMITTED waypoints (whole ordered sequence, not just
+    #     per-line) are closer than spacing_min. Also asserts the max cap in
+    #     quiet regions, correct line_id, no duplicates, refinement coverage,
+    #     and a deterministic resolution for an infeasible (sub-min) event.
+    # -----------------------------------------------------------------------
+    @testset "strict minimum spacing invariant" begin
+        TOL = 1e-6
+
+        # all consecutive Euclidean gaps over the FULL ordered waypoint list
+        _all_gaps(wps) = [hypot(wps[k+1].x - wps[k].x, wps[k+1].y - wps[k].y)
+                          for k in 1:length(wps)-1]
+
+        # ---- (a) helper-level unit tests: _span_interior never emits sub-min ----
+        @testset "_span_interior gaps ∈ [min,max] by construction" begin
+            spanpts(a, b; fine) = KDEFlightPlanning._span_interior(a, b, 10.0, 30.0; fine=fine)
+            gapsof(a, b; fine) = diff(vcat(a, spanpts(a, b; fine=fine), b))
+            for span in vcat(collect(10.5:0.37:120.0), [30.0, 60.0, 90.0, 35.0, 65.0, 31.0])
+                gq = gapsof(0.0, span; fine=false)   # quiet
+                ge = gapsof(0.0, span; fine=true)    # event
+                @test all(g -> g >= 10.0 - TOL, gq)       # strict min (quiet)
+                @test all(g -> g <= 30.0 + TOL, gq)       # max cap (quiet)
+                @test all(g -> g >= 10.0 - TOL, ge)       # strict min (event)
+                @test all(g -> g < 2*10.0 + TOL, ge)      # event step < 2·min (fine)
+            end
+        end
+
+        # ---- (b) uniform: every whole-sequence gap ≥ min, ≤ max -----------------
+        @testset "uniform → all gaps in [min,max]" begin
+            grid = uniform_grid(0.5; nx = 80, ny = 20,
+                                xmin = 0.0, xmax = 397.0, ymin = 0.0, ymax = 100.0)
+            path = _single_line_path(397.0)   # not a multiple of 30 → forces remainder
+            strat = CurvatureGuidedSpeed(grid; vmin = 2.0, vmax = 8.0)
+            wps = generate_waypoints(path, grid, strat;
+                                     spacing_min = SMIN, spacing_max = SMAX)
+            g = _all_gaps(wps)
+            @test minimum(g) >= SMIN - TOL
+            @test maximum(g) <= SMAX + TOL
+            @test all(w -> w.line_id >= 1, wps)
+        end
+
+        # ---- (c) broad plateau: strict min everywhere + refinement each side ----
+        @testset "broad plateau: strict min + two-sided refinement" begin
+            x_lo, x_hi, hw = 110.0, 190.0, 4.0
+            prof(x) = _edge(x, x_lo, hw) - _edge(x, x_hi, hw)
+            grid = _grid_from_profile(prof)
+            path = _single_line_path(300.0)
+            strat = CurvatureGuidedSpeed(grid; vmin = 2.0, vmax = 8.0)
+            wps = generate_waypoints(path, grid, strat;
+                                     spacing_min = SMIN, spacing_max = SMAX,
+                                     density_threshold = 0.5, event_margin = SMIN)
+            g = _all_gaps(wps)
+            @test minimum(g) >= SMIN - TOL
+            @test maximum(g) <= SMAX + TOL
+            gaps, line = _line_gaps(wps, 1)
+            @test all(gg -> gg >= SMIN - TOL, gaps)
+            # ≥1 refinement waypoint on EACH side of each edge (feasible here)
+            xs_line = [w.x for w in line]
+            for x0 in (x_lo, x_hi)
+                @test any(x -> x0 - 2SMIN - TOL <= x < x0, xs_line)  # anticipatory
+                @test any(x -> x0 < x <= x0 + 2SMIN + TOL, xs_line)  # trailing
+            end
+        end
+
+        # ---- (d) overlapping / adjacent events merge without sub-min gaps -------
+        @testset "overlapping events: no sub-min at merged edges" begin
+            # two bumps closer than 2·event_margin → their bands overlap/merge
+            b1, b2, hw = 150.0, 168.0, 3.0
+            prof(x) = exp(-0.5*((x-b1)/hw)^2) + exp(-0.5*((x-b2)/hw)^2)
+            grid = _grid_from_profile(prof)
+            path = _single_line_path(300.0)
+            strat = CurvatureGuidedSpeed(grid; vmin = 2.0, vmax = 8.0)
+            wps = generate_waypoints(path, grid, strat;
+                                     spacing_min = SMIN, spacing_max = SMAX,
+                                     density_threshold = 0.5, event_margin = SMIN)
+            g = _all_gaps(wps)
+            @test minimum(g) >= SMIN - TOL
+            @test maximum(g) <= SMAX + TOL
+        end
+
+        # ---- (e) short residual segment (L just over min) -----------------------
+        @testset "short residual segment degrades gracefully" begin
+            # a path whose single segment is only slightly longer than min:
+            grid = uniform_grid(0.5; nx = 20, ny = 8,
+                                xmin = 0.0, xmax = 12.0, ymin = 0.0, ymax = 12.0)
+            path = _single_line_path(12.0)     # L = 12  (> min=10, < max=30)
+            strat = CurvatureGuidedSpeed(grid; vmin = 2.0, vmax = 8.0)
+            wps = generate_waypoints(path, grid, strat;
+                                     spacing_min = SMIN, spacing_max = SMAX)
+            g = _all_gaps(wps)
+            @test length(wps) == 2                 # only endpoints fit
+            @test minimum(g) >= SMIN - TOL
+            @test maximum(g) <= SMAX + TOL
+        end
+
+        # ---- (f) multi-line turns: strict min ACROSS corners, correct line_id ---
+        @testset "multi-line turns: strict min across corners" begin
+            x_lo, x_hi, hw = 110.0, 190.0, 4.0
+            prof(x) = _edge(x, x_lo, hw) - _edge(x, x_hi, hw)
+            grid = _grid_from_profile(prof; Y = 200.0, ny = 60)
+            spec = LawnmowerSpec(xmin = 0.0, xmax = 300.0, ymin = 0.0, ymax = 160.0,
+                                 spacing = 40.0, yaw_deg = 0.0, primary = :x, start = :low)
+            path = lawnmower_from_extents(spec)
+            strat = CurvatureGuidedSpeed(grid; vmin = 2.0, vmax = 8.0)
+            wps = generate_waypoints(path, grid, strat;
+                                     spacing_min = SMIN, spacing_max = SMAX,
+                                     density_threshold = 0.5)
+            g = _all_gaps(wps)
+            @test minimum(g) >= SMIN - TOL             # incl. turn/corner gaps
+            @test all(w -> w.line_id >= 1, wps)
+            dups = count(x -> x < 1e-6, g)
+            @test dups == 0
+        end
+
+        # ---- (g) INFEASIBLE narrow event: deterministic collapse to one point ---
+        @testset "infeasible narrow event collapses (no sub-min)" begin
+            # Directly exercise the placer with an event interval NARROWER than
+            # spacing_min. It cannot host both edges without a sub-min gap, so it
+            # is deterministically collapsed to a single representative point.
+            L = 200.0
+            narrow = [(100.0, 105.0)]              # width 5 < spacing_min 10
+            pos = KDEFlightPlanning._place_positions(L, narrow;
+                        spacing_min = 10.0, spacing_max = 30.0, min_step = 0.5)
+            gaps = diff(pos)
+            @test minimum(gaps) >= 10.0 - TOL      # strict min preserved
+            @test maximum(gaps) <= 30.0 + TOL
+            @test pos[1] == 0.0 && pos[end] == L   # endpoints retained
+            # exactly one representative point lands in the collapsed band
+            @test count(p -> 100.0 - TOL <= p <= 105.0 + TOL, pos) == 1
+            # a wide (feasible) event, by contrast, keeps BOTH edges + interior
+            wide = KDEFlightPlanning._place_positions(L, [(60.0, 120.0)];
+                        spacing_min = 10.0, spacing_max = 30.0, min_step = 0.5)
+            @test minimum(diff(wide)) >= 10.0 - TOL
+            @test count(p -> 60.0 - TOL <= p <= 120.0 + TOL, wide) >= 3
+        end
+    end
 end
