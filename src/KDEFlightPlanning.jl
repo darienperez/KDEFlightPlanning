@@ -316,7 +316,7 @@ export build_density_surface, run_pipeline
 export build_mask_from_image, build_mask_autok
 export build_mask_from_image_strided
 export run_full_pipeline
-export axes_from_geotransform, pixel_axes
+export axes_from_geotransform, geotransform_resolution, pixel_axes
 export load_rgb_georef
 
 # --- Trajectory analysis ---
@@ -336,6 +336,7 @@ export line_scan_cover_metrics, single_line_cover_metrics
 # --- Planning metadata ---
 export export_planning_metadata, waypoint_spacing_note
 export save_cluster_overlays, require_tree_labels, interactive_tree_labels
+export resolve_autok_tree_labels, validate_tree_labels, parse_cluster_id_input
 
 # --- KDE-density-stratified coverage (secondary mechanism) ---
 export kde_cr_by_quantile_bins, kde_strata_table

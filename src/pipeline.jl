@@ -55,6 +55,42 @@ function axes_from_geotransform(gt::AbstractVector, W::Integer, H::Integer)
     return xs, ys
 end
 
+"""
+    geotransform_resolution(gt) -> (xres, yres)
+
+Extract the ground sampling distance (metres per pixel) along each pixel axis
+from a 6-term GDAL affine geotransform, robust to rotation/skew.
+
+The GDAL geotransform maps pixel `(col, row)` (0-based) to world `(X, Y)`:
+
+    X = gt[1] + col·gt[2] + row·gt[3]
+    Y = gt[4] + col·gt[5] + row·gt[6]
+
+(Here `gt` is the package's 1-based `GeoTransform`/vector: `gt[1]=x_origin`,
+`gt[2]=dx`, `gt[3]=x_rot`, `gt[4]=y_origin`, `gt[5]=y_rot`, `gt[6]=dy`, which
+is GDAL 0-based `GT[0..5]` shifted by one.)
+
+Stepping one column advances world position by `(gt[2], gt[5])`; stepping one
+row advances by `(gt[3], gt[6])`. The physical pixel size along each axis is
+therefore the Euclidean length of these column/row axis vectors:
+
+    xres = hypot(gt[2], gt[5])   # length of the per-column axis vector
+    yres = hypot(gt[3], gt[6])   # length of the per-row axis vector
+
+Using `hypot` (rather than `abs(gt[2])` / `abs(gt[6])`) means rotated or
+skewed geotransforms return the true on-ground spacing, not just the axis-
+aligned component. For a north-up transform (`gt[3]=gt[5]=0`) this reduces to
+`(abs(gt[2]), abs(gt[6]))`.
+
+Accepts a `GeoTransform`, or any indexable length-≥6 vector.
+"""
+function geotransform_resolution(gt)
+    length(gt) >= 6 || throw(ArgumentError("gt must have ≥ 6 elements (GDAL geotransform)"))
+    xres = hypot(Float64(gt[2]), Float64(gt[5]))
+    yres = hypot(Float64(gt[3]), Float64(gt[6]))
+    return xres, yres
+end
+
 # ---------------------------------------------------------------------------
 # Uniform pixel-space axes (for image-array workflows)
 # ---------------------------------------------------------------------------
@@ -346,13 +382,43 @@ end
 """
     build_mask_autok(rgb_path;
         cfg=PipelineConfig(),
-        ks=2:6, nsample=2000,
-        metric=Euclidean(), k_strategy=:silhouette,
-        tree_labels=nothing, do_cleanup=true)
+        ks=2:12, nsample=2000,
+        metric=Euclidean(), k_strategy=:vote,
+        tree_labels=nothing, do_cleanup=true,
+        interactive=true, isatty_fn=()->Base.isatty(stdin),
+        label_selector=nothing, overlay_outdir="output/cluster_overlays")
     -> (mask_grid::RasterGrid, info::NamedTuple)
 
 Full end-to-end from a GeoTIFF path to a canopy mask RasterGrid, with
 automatic k selection via a quality-metric sweep.
+
+Vegetation label resolution (clustering happens exactly once, first)
+--------------------------------------------------------------------
+There is NO silent `tree_labels` default (a missing selection is never turned
+into `[1]` or the greenest cluster). After the single auto-k clustering pass,
+`resolve_autok_tree_labels` decides the labels:
+
+- **Explicit, nonempty `tree_labels`** → validated and used verbatim, with no
+  prompt (deterministic; safe for CI/batch use).
+- **Absent (`nothing`/empty) on an interactive TTY** → cluster overlays are
+  rendered under `overlay_outdir` and the user selects the vegetation cluster(s)
+  (reprompting until valid) via the canonical `interactive_tree_labels`.
+- **Absent when non-interactive / non-TTY** → a descriptive error is raised
+  immediately after clustering, telling the caller to pass `tree_labels`.
+
+The confirmed labels are recorded in the returned `info` as `tree_labels` (with
+`tree_labels_source ∈ (:explicit, :interactive)`); this function does not write
+any config/TOML — persistence is the caller's responsibility.
+
+Keyword seams
+-------------
+- `interactive`: set `false` to force the non-interactive contract (library
+  callers that must never prompt).
+- `isatty_fn`: predicate deciding whether stdin is interactive (injectable for
+  tests; defaults to `Base.isatty(stdin)`).
+- `label_selector`: optional `(img, labels_full, H, W, k) -> ids` callback used
+  instead of the built-in prompt (injectable for tests); its result is validated.
+- `overlay_outdir`: directory for the per-cluster overlay previews.
 
 Requires:
 - ArchGDAL.jl loaded in the caller's session (for `load_rgb_georef`)
@@ -367,7 +433,11 @@ function build_mask_autok(rgb_path::AbstractString;
                            metric=Distances.Euclidean(),
                            k_strategy::Symbol=:vote,  # paper default
                            tree_labels::Union{Nothing,AbstractVector{<:Integer}}=nothing,
-                           do_cleanup::Bool=true)
+                           do_cleanup::Bool=true,
+                           interactive::Bool=true,
+                           isatty_fn=()->Base.isatty(stdin),
+                           label_selector=nothing,
+                           overlay_outdir::AbstractString="output/cluster_overlays")
 
     rng = Random.MersenneTwister(cfg.seed)
 
@@ -412,8 +482,16 @@ function build_mask_autok(rgb_path::AbstractString;
     labels_full, res_sample, kinfo = kmedoids_fit(Xuse;
         k=kstar, idxs_sample=idxs, D=D, metric=metric, rng=rng)
 
-    # 7) Tree labels
-    tl = tree_labels !== nothing ? tree_labels : cfg.tree_labels
+    # 7) Tree labels — resolve AFTER the single clustering pass. No silent
+    #    default: explicit labels are used verbatim; otherwise prompt on a TTY
+    #    or error clearly (see resolve_autok_tree_labels).
+    label_source = (tree_labels !== nothing && !isempty(tree_labels)) ?
+                   :explicit : :interactive
+    tl = resolve_autok_tree_labels(tree_labels, img, labels_full, kstar, H, W;
+             interactive    = interactive,
+             is_tty         = isatty_fn(),
+             label_selector = label_selector,
+             overlay_outdir = overlay_outdir)
 
     # 8) Build mask
     mask_bm = labels_to_mask(labels_full, H, W; tree_labels=tl)
@@ -431,6 +509,8 @@ function build_mask_autok(rgb_path::AbstractString;
             labels_full=labels_full,
             mask=mask_bm,
             k=kstar, metrics=metrics,
+            tree_labels=tl,
+            tree_labels_source=label_source,
             sample_indices=idxs,
             medoids_sample=res_sample.medoids,
             H=H, W=W, xs=xs, ys=ys, gt=gt,
@@ -559,6 +639,11 @@ Arguments
 - `kde_cfg`:    `PipelineConfig` for the KDE step.
 - `flight_cfg`: `FlightConfig` for waypoint generation (pass `nothing` to
                 skip waypoints and return `wps=[]`).
+- `tree_labels`: vegetation cluster label(s). For a GeoTIFF path input these are
+                forwarded to `build_mask_autok` as explicit labels (default
+                `[1]`), so this convenience API stays deterministic and never
+                prompts; pass `interactive=false` to enforce that contract.
+- `interactive`: forwarded to `build_mask_autok` for path inputs.
 - Other kwargs: forwarded to `build_mask_from_image`.
 
 Returns `(mask_grid, dens_grid, wps, info)`.
@@ -574,12 +659,17 @@ function run_full_pipeline(img_or_arr_or_path;
                              k_strategy::Symbol=:vote,  # paper default
                              use_pca::Bool=false,
                              do_cleanup::Bool=false,
+                             interactive::Bool=true,
                              kwargs...)
-    # 1) Mask (paper default ks=2:12)
+    # 1) Mask (paper default ks=2:12). For a GeoTIFF path, forward the explicit
+    #    `tree_labels` (default `[1]`) so this convenience API stays deterministic
+    #    and never silently prompts; pass `interactive=false` / explicit labels
+    #    to enforce the non-interactive contract.
     mask_grid, mask_info = if img_or_arr_or_path isa AbstractString
         build_mask_autok(img_or_arr_or_path;
             cfg=kde_cfg, ks=(ks !== nothing ? ks : 2:12),
             nsample=nsample, k_strategy=k_strategy,
+            tree_labels=tree_labels, interactive=interactive,
             do_cleanup=do_cleanup)
     else
         build_mask_from_image(img_or_arr_or_path;
