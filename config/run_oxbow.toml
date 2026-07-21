@@ -82,7 +82,7 @@ report_formats         = ["png"]
 # Vegetation cluster ids. The package default is [1] (single cluster); the
 # tree class may span multiple clusters at higher k — set explicitly here
 # after reviewing the cluster overlays.
-tree_labels            = []
+tree_labels            = [2]
 
 [gli_class_codes]
 field = 2
