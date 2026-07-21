@@ -124,7 +124,14 @@ xs_geo, ys_geo = axes_from_geotransform(KDEFlightPlanning._gt_as_vector(rs.gt), 
 label_img = permutedims(reshape(mask_info.labels_full, W, H), (2, 1))
 tree_mask = in.(label_img, Ref(inputs.tree_labels))
 
-mask_rg = RasterGrid(Float64.(tree_mask), xs_geo, ys_geo)
+# `label_img`/`tree_mask` are in native GeoTIFF row order (row 1 = north, the
+# top of the orthomosaic). `axes_from_geotransform` returns `ys_geo` ASCENDING
+# (index 1 = southernmost / min northing). A `RasterGrid` requires ascending
+# `ys` with `Z[j, :]` co-located at `ys[j]` — the convention every sampler
+# (`sample_density`, gradient, curvature) relies on. Flip the mask rows so the
+# stored grid obeys it; otherwise density is read from the vertically-mirrored
+# row and waypoint speeds come out north/south-reversed.
+mask_rg = RasterGrid(reverse(Float64.(tree_mask); dims = 1), xs_geo, ys_geo)
 
 # Determine pixel size in metres from the geotransform (used for the
 # m → px conversion in [waypoints] below).
@@ -224,7 +231,10 @@ report_kde_density(dens_grid, inputs.outdir;
 kde_tif = joinpath(inputs.outdir, "kde", "kde_density.tif")
 mkpath(dirname(kde_tif))
 try
-    write_single_band_geotiff(kde_tif, dens_grid.Z, rs.gt, rs.crs)
+    # `dens_grid.Z` is stored south-first (RasterGrid ascending-ys convention);
+    # the geotransform is north-up (dy < 0, row 1 = north), so flip rows back to
+    # north-first to keep the raster co-registered with the source orthomosaic.
+    write_single_band_geotiff(kde_tif, reverse(dens_grid.Z; dims = 1), rs.gt, rs.crs)
     println("  → kde_density.tif (co-registered)")
 catch e
     @warn "Failed to write co-registered kde_density.tif" exception=e

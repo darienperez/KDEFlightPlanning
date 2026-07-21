@@ -714,10 +714,16 @@ function report_kde_density(dens::RasterGrid,
     if isnothing(gt)
         hm = heatmap!(ax, Zds; colormap = :viridis)
     else
+        # `dens.Z` follows the RasterGrid convention (ascending ys, row 1 = min
+        # northing), so it maps straight onto the ascending Northing range via
+        # `permutedims` — identical orientation to `report_speed_map`. (This
+        # previously applied an extra `reverse(dims=1)` to compensate for a grid
+        # built north-first; that inconsistency is now fixed at grid
+        # construction, so the compensation is removed.)
         ex = raster_extents(Z, gt)
         hm = heatmap!(ax, range(ex.xmin, ex.xmax; length = Wd),
                           range(ex.ymin, ex.ymax; length = Hd),
-                          permutedims(reverse(Zds; dims=1));
+                          permutedims(Zds);
                           colormap = :viridis)
     end
     Colorbar(fig[1, 2], hm; label = "Density (0 = open, 1 = max canopy)")

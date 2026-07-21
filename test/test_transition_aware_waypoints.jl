@@ -382,3 +382,130 @@ end
         end
     end
 end
+
+# ===========================================================================
+# North/South orientation regression tests (fix/speed-map-orientation).
+#
+# The canonical pipeline builds a `RasterGrid` from a native GeoTIFF mask
+# (row 1 = NORTH) paired with ASCENDING `ys_geo` (index 1 = SOUTH). The grid
+# must therefore store rows south-first (Z[j,:] ↔ ys[j]); the mask must be
+# flipped on construction. Failing to do so vertically mirrors every
+# density read — so waypoint speeds come out north/south-reversed even though
+# the KDE heatmap (which used to carry a compensating reverse) looked right.
+#
+# These tests lock the convention: with the correct construction, high canopy
+# in the NORTH must read as high density in the NORTH, produce LOW waypoint
+# speeds in the NORTH, and the buggy (unflipped) construction must fail the
+# same probe.
+# ===========================================================================
+@testset "north/south orientation (georef)" begin
+    K = KDEFlightPlanning
+
+    # Mirror run_from_config grid construction with an asymmetric N/S marker.
+    W, H = 40, 30
+    x_origin = 340000.0
+    y_origin = 4772120.0          # top-left corner northing (NORTH)
+    dx, dy = 1.0, -1.0            # north-up ⇒ dy < 0
+    gt = K.GeoTransform([x_origin, dx, 0.0, y_origin, 0.0, dy])
+    xs_geo, ys_geo = K.axes_from_geotransform(K._gt_as_vector(gt), W, H)
+
+    @test issorted(ys_geo)        # axes_from_geotransform returns ascending ys
+
+    # Native GeoTIFF row order: row 1 = north. Canopy in the NORTH third only.
+    tree_mask = zeros(Float64, H, W)
+    tree_mask[1:H÷3, :] .= 1.0
+
+    # probe coordinates well inside the north / south thirds
+    xmid    = x_origin + W * dx / 2
+    y_north = y_origin - 2.0            # high northing (near top row = north)
+    y_south = y_origin + H * dy + 2.0   # low northing  (near bottom = south)
+
+    @testset "sample_density reads marker at true north (fixed)" begin
+        fixed = K.RasterGrid(reverse(tree_mask; dims = 1), xs_geo, ys_geo)
+        dN = K.sample_density(fixed, xmid, y_north)
+        dS = K.sample_density(fixed, xmid, y_south)
+        @test dN > dS                  # canopy correctly read at the north
+        @test dN > 0.5 && dS < 0.5
+    end
+
+    @testset "unflipped construction is vertically mirrored (guards the bug)" begin
+        buggy = K.RasterGrid(tree_mask, xs_geo, ys_geo)
+        dN = K.sample_density(buggy, xmid, y_north)
+        dS = K.sample_density(buggy, xmid, y_south)
+        @test dN < dS                  # the defect: marker read at the south
+    end
+end
+
+@testset "north/south waypoint speeds + strict spacing" begin
+    K2 = KDEFlightPlanning
+
+    # Build an ascending-ys grid whose density rises to the NORTH (high y).
+    # (This is the state a correctly-constructed pipeline grid is in.)
+    W, H = 60, 40
+    x0, y0 = 500000.0, 4000000.0
+    xs = collect(range(x0, x0 + 590.0; length = W))
+    ys = collect(range(y0, y0 + 390.0; length = H))   # ascending: index 1 = south
+    Z  = zeros(H, W)
+    for j in 1:H
+        # smooth south→north ramp: low density south, high density (canopy) north
+        v = (j - 1) / (H - 1)
+        Z[j, :] .= v
+    end
+    grid = K2.RasterGrid(Z, xs, ys)
+
+    # sanity: north band denser than south band
+    @test mean(Z[end, :]) > mean(Z[1, :])
+
+    strat = K2.CurvatureGuidedSpeed(grid; vmin = 2.0, vmax = 8.0)
+
+    spec = K2.LawnmowerSpec(xmin = first(xs), xmax = last(xs),
+                            ymin = first(ys), ymax = last(ys),
+                            spacing = 30.0, yaw_deg = 0.0,
+                            primary = :x, start = :low)
+    path = K2.lawnmower_from_extents(spec)
+    wps = K2.generate_waypoints(path, grid, strat;
+                                seconds_per_wp = 1.0,
+                                spacing_min = SMIN, spacing_max = SMAX)
+
+    @test !isempty(wps)
+
+    # speeds within configured bounds
+    @test all(2.0 - 1e-6 <= w.speed <= 8.0 + 1e-6 for w in wps)
+
+    # high density → low speed, so NORTH (high y) waypoints must be SLOWER
+    ymid = (first(ys) + last(ys)) / 2
+    north = [w.speed for w in wps if w.y > ymid]
+    south = [w.speed for w in wps if w.y <= ymid]
+    @test !isempty(north) && !isempty(south)
+    @test mean(north) < mean(south)
+
+    # strict-min spacing invariant unaffected by the orientation fix
+    for lid in unique(w.line_id for w in wps)
+        gaps, _ = _line_gaps(wps, lid)
+        isempty(gaps) && continue
+        @test minimum(gaps) >= SMIN - 1e-6
+        @test maximum(gaps) <= SMAX + 1e-6
+    end
+end
+
+@testset "report_kde_density / report_speed_map orientation smoke" begin
+    K3 = KDEFlightPlanning
+
+    W, H = 30, 24
+    x_origin, y_origin = 340000.0, 4772000.0
+    gt = K3.GeoTransform([x_origin, 1.0, 0.0, y_origin, 0.0, -1.0])
+    xs_geo, ys_geo = K3.axes_from_geotransform(K3._gt_as_vector(gt), W, H)
+
+    # canopy in the north third (native), flipped for the ascending grid
+    mask = zeros(Float64, H, W)
+    mask[1:H÷3, :] .= 1.0
+    grid = K3.RasterGrid(reverse(mask; dims = 1), xs_geo, ys_geo)
+    strat = K3.CurvatureGuidedSpeed(grid; vmin = 2.0, vmax = 8.0)
+
+    mktempdir() do dir
+        K3.report_kde_density(grid, dir; gt = gt, formats = ["png"])
+        K3.report_speed_map(grid, strat, dir; gt = gt, formats = ["png"])
+        @test isfile(joinpath(dir, "kde", "kde_density_heatmap.png"))
+        @test isfile(joinpath(dir, "kde", "speed_map.png"))
+    end
+end
