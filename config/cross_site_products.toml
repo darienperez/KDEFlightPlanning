@@ -1,0 +1,22 @@
+out_dir = "../output/cross_site"
+
+[defaults]
+seed = 6213
+nsample = 2000
+kmedoids_k_range = [2, 12]
+cluster_stride = 8
+
+[[site]]
+name = "Hubbard Brook"
+geotiff = "../data/site_images/HB_ortho_P4_2024_01_18.tif"
+tree_labels = [1]
+
+[[site]]
+name = "Kingman Farm"
+geotiff = "../data/site_images/KF_ortho_P4_2024_01_18_cropped.tif"
+tree_labels = [2]
+
+[[site]]
+name = "Oxbow Farm"
+geotiff = "../data/site_images/OB_reproj_cropped.tiff"
+tree_labels = [2]
