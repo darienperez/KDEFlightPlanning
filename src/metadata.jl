@@ -355,7 +355,7 @@ function interactive_tree_labels(img, labels_full::AbstractVector{Int},
     println("\nAvailable clusters: $(ks)")
     println("Enter comma-separated cluster numbers for VEGETATION/TREES (e.g. 2,4): ")
 
-    if !isatty(stdin)
+    if !Base.isatty(stdin)
         @warn "interactive_tree_labels: stdin is not a TTY. " *
               "Returning empty tree_labels. " *
               "Call require_tree_labels() to validate before proceeding."

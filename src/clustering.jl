@@ -100,8 +100,14 @@ function kmedoids_fit(X::AbstractMatrix;
                sample_distance_matrix(X, idxs; metric=metric)
     end
 
-    # Run k-medoids on the sample distance matrix
-    result = Clustering.kmedoids(Dm, k)
+    # Run k-medoids on the sample distance matrix.
+    # Determinism: the default `:kmpp` seeding draws from the *global* RNG, so
+    # two runs with identical inputs can diverge. When a seed/rng is supplied we
+    # precompute the k-medoids++ seeds with that RNG and pass them as an explicit
+    # `init` vector — no global RNG state is touched, and the fit is reproducible.
+    init = rng === nothing ? :kmpp :
+           Clustering.initseeds_by_costs(:kmpp, Dm, k; rng=rng)
+    result = Clustering.kmedoids(Dm, k; init=init)
     labels_sample = Clustering.assignments(result)
 
     # Medoid coordinates in feature space (for assignment step)
@@ -346,10 +352,15 @@ function sweep_k_quality(X::AbstractMatrix,
                           nsample::Union{Nothing,Int}=nothing)
     Xs = X[idxs, :]
     results = ClusterMetrics[]
+    # One seeded RNG threaded through the whole sweep so the k-selection step is
+    # reproducible from `seed` alone (see `kmedoids_fit` for the rationale).
+    rng = seed === nothing ? nothing : Random.MersenneTwister(seed)
     for k in ks
         k > length(idxs) && continue   # can't have more clusters than samples
 
-        res    = Clustering.kmedoids(D, k)
+        init   = rng === nothing ? :kmpp :
+                 Clustering.initseeds_by_costs(:kmpp, D, k; rng=rng)
+        res    = Clustering.kmedoids(D, k; init=init)
         labs   = Clustering.assignments(res)
 
         sil  = _silhouette_score(D, labs)

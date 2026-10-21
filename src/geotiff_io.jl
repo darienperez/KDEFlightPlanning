@@ -177,26 +177,33 @@ _gt_as_vector(gt::GeoTransform) = [
 # ---------------------------------------------------------------------------
 
 """
-    write_single_band_geotiff(path, Z, gt, crs_wkt; nodata=nothing) -> path
+    write_single_band_geotiff(path, Z, gt, crs_wkt; nodata=nothing, dtype=Float64) -> path
 
-Write a single-band Float64 raster as a GeoTIFF with the supplied
-geotransform and CRS. Used for emitting KDE density and speed-map products
-that should remain co-registered with the source orthomosaic.
+Write a single-band raster as a GeoTIFF with the supplied geotransform and CRS,
+so the product stays co-registered with the source orthomosaic.
+
+`dtype` selects the on-disk band type (default `Float64`). Pass an integer type
+(e.g. `Int32` for a cluster-label raster, `UInt8` for a 0/1 vegetation mask) to
+persist discrete rasters compactly with an explicit `nodata`; `Z` is converted to
+`dtype` before writing (rounded for integer targets). KDE density surfaces keep
+the `Float64` default. The `nodata` value, when given, is cast to `dtype`.
 """
 function write_single_band_geotiff(path::AbstractString,
                                     Z::AbstractMatrix{<:Real},
                                     gt::GeoTransform,
                                     crs_wkt::AbstractString;
-                                    nodata::Union{Nothing, Real} = nothing)
-    Z64 = Matrix{Float64}(Z)
-    H, W = size(Z64)
+                                    nodata::Union{Nothing, Real} = nothing,
+                                    dtype::Type{<:Real} = Float64)
+    H, W = size(Z)
+    # Convert to the requested on-disk type (round for integer targets).
+    Zt = dtype <: Integer ? map(x -> dtype(round(x)), Z) : Matrix{dtype}(Z)
     mkpath(dirname(abspath(path)))
     # GDAL expects (W, H); transpose back.
-    Z_gdal = permutedims(Z64)
+    Z_gdal = permutedims(Zt)
     AG.create(path;
         driver = AG.getdriver("GTiff"),
         width  = W, height = H, nbands = 1,
-        dtype  = Float64) do ds
+        dtype  = dtype) do ds
         AG.setgeotransform!(ds, _gt_as_vector(gt))
         if !isempty(crs_wkt)
             AG.setproj!(ds, crs_wkt)
