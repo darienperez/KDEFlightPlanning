@@ -4,7 +4,6 @@ Reproducible analysis code for the manuscript:
 
 > **KDE-Guided Offline Variable-Speed Flight Planning for UAV LiDAR in Forested Terrain**
 > Darien D. Perez Martin, Adam G. Hunsaker, Jennifer M. Jacobs, May-Win Thein
-> Target venue: *Remote Sensing* (MDPI), in preparation.
 
 The package implements a KDE-guided adaptive flight-planning pipeline and the
 statistical analysis used to evaluate it:
