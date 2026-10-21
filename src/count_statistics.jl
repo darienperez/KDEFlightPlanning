@@ -53,7 +53,8 @@ This exactly matches the `morans_I` implementation in `lidar.jl`.
 
 Decoded matrices use `(rows, columns)` with north in the first row. Legacy
 `counts.json` array records are decoded as
-`reverse(reshape(values, 263, 324); dims=1)`. The current writer's object schema
+`reshape(values, 263, 324)` (column-major, no row flip), verified against the
+original GLI class raster. The current writer's object schema
 declares `nrows` and `ncols` and stores row-major values, decoded without a row
 flip. All consumers use the same decoder. Scalar statistics are invariant to
 orientation, but spatial adjacency and block placement require this layout.
@@ -452,7 +453,7 @@ function _decode_count_values(values::AbstractVector, nrows::Integer, ncols::Int
     length(values) == nr * nc || throw(DimensionMismatch(
         "Count grid has $(length(values)) elements; expected $(nr * nc) ($nr×$nc)"))
     if layout === :legacy
-        return reverse(reshape(T.(values), nr, nc); dims=1)
+        return reshape(T.(values), nr, nc)
     elseif layout === :rowmajor
         return permutedims(reshape(T.(values), nc, nr))
     end
@@ -466,8 +467,9 @@ end
 Load either supported `counts.json` schema into `(rows, columns)` matrices:
 
 - Legacy array: each record has a `key` object and flat `matrix` vector. The
-  historical encoding is decoded with `reverse(reshape(values, nrows, ncols);
-  dims=1)`, defaulting to the Durham grid of 263 rows × 324 columns.
+  historical encoding is column-major and is decoded with
+  `reshape(values, nrows, ncols)`, defaulting to the Durham grid of 263 rows ×
+  324 columns. Its rows already match the original north-up GLI raster.
 - Current writer object: `nrows`, `ncols`, and `records`, whose records contain
   `ret`, `cover`, `mission`, `kernel`, and row-major `values`. Dimensions come
   from metadata and decoding preserves the written row order.

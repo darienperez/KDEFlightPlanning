@@ -146,7 +146,9 @@ ortho is not bundled).
 **Bundled under `data/ground_truth/`** (derived inputs for the analyses):
 
 - `counts.json` — cover × mission return-count grids (263×324). The legacy
-  vectors decode to the same north-up matrix in every analysis. The schema
+  vectors are column-major, with north in the first row and no row flip;
+  alignment is verified against the original GLI class raster. Every analysis
+  uses the same decoder. The schema
   written by `write_count_grids_json` is also supported and records its shape.
 - `stats_and_coverage.csv`, `percent_densities.csv` — manuscript summary tables.
 - `E_density_aware__waypoints_xy.csv` — planned KDE-guided waypoints.
@@ -171,6 +173,13 @@ ortho is not bundled).
 
 The large raw rasters, LAS files, and trajectory CSVs are **not** required for
 the test suite or the smoke run.
+
+The original GLI raster reports EPSG:26919, whereas the package's Durham
+planning defaults use EPSG:6348. Its affine origin also differs from the
+hardcoded planning-grid default. Count-array alignment with the GLI classes
+is verified, but absolute alignment with orthomosaics and trajectories must
+be checked from their source metadata. The bootstrap uses the original
+mask cells without reprojection; spatial scripts use its affine transform.
 
 ### Outputs (written under the config's `outdir`, e.g. `output/durham/`)
 
@@ -244,6 +253,17 @@ export KDE_TEST_COUNTS_JSON=/path/to/counts.json
 export KDE_TEST_STATS_CSV=/path/to/stats_and_coverage.csv
 export KDE_TEST_WAYPOINTS_CSV=/path/to/E_density_aware__waypoints_xy.csv
 ```
+
+To additionally check all bundled count grids against the original cover
+raster, run the suite with the optional private input:
+
+```bash
+KDEFLIGHTPLANNING_GLI_CLASS_RASTER=/path/to/original_gli.tif \
+  julia --project=. -e 'using Pkg; Pkg.test()'
+```
+
+This check verifies cover areas, includes never-hit cells, and rejects a
+reflected mask with otherwise identical cover totals.
 
 ---
 

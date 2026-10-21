@@ -4,16 +4,16 @@ using JSON
 using KDEFlightPlanning
 
 # Include cells that received no returns in either mission. Legacy count arrays
-# are flattened in column-major order with south-first rows. The fixture is
+# are flattened in column-major order with north-first rows. The fixture is
 # deliberately nonsquare, so exact-mask tests exercise the north-first decoder.
 function _write_bootstrap_mask_fixture(path, a, b)
     records = [
         Dict("key" => Dict("ret" => "ground", "cover" => "field",
                            "mission" => "density", "kernel" => "E"),
-             "matrix" => vec(reverse(a; dims=1))),
+             "matrix" => vec(a)),
         Dict("key" => Dict("ret" => "ground", "cover" => "field",
                            "mission" => "const2", "kernel" => "NA"),
-             "matrix" => vec(reverse(b; dims=1))),
+             "matrix" => vec(b)),
     ]
     open(path, "w") do io
         JSON.print(io, records)

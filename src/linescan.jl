@@ -10,10 +10,10 @@ Ports the logic from:
 The Durham, NH count-grid has shape (263 rows × 324 columns) in geographic
 (row=north) orientation. The `count_grid` reshape convention in Python is:
 
-    mat = np.array(values).reshape((324, 263), order='C').T   # → (263, 324)
-    mat = np.flipud(mat)                                        # row 0 = north
+    mat = np.array(values).reshape((263, 324), order='F')  # row 0 = north
 
-We replicate this in `decode_count_grid`.
+No row flip is applied: the original GLI class raster confirms this layout
+for all 36 bundled count grids. We replicate it in `decode_count_grid`.
 
 ## API
 
@@ -45,7 +45,7 @@ Reshape a flat count-grid `values` vector (length 324 × 263) into a
 (263 × 324) matrix with row 0 at the geographic north, matching the Python
 convention used in the project's `counts.json`.
 
-Decode the legacy encoding as `reverse(reshape(values, nrows, ncols); dims=1)`.
+Decode the legacy encoding as `reshape(values, nrows, ncols)` with no row flip.
 Use [`load_count_grids`](@ref) for files, which also supports the current writer
 schema and its dimension metadata.
 """

@@ -1310,18 +1310,18 @@ end
 end
 
 # ===========================================================================
-# 46. decode_count_grid — shape and flip convention
+# 46. decode_count_grid — shape and north-first column-major convention
 # ===========================================================================
-@testset "decode_count_grid: shape and flip" begin
+@testset "decode_count_grid: shape and native row order" begin
     # Flat vector length 263*324
     vals = collect(Float64, 1:(263*324))
     mat  = decode_count_grid(vals)
     @test size(mat) == (263, 324)
-    # After flip: first row = last row before flip
-    # Before flip mat[1,1] = vals[1] (column-major reshape)
-    # After reverse(dims=1): mat[1,:] = original last row = mat_orig[263,:]
-    mat_noflip = reshape(vals, 263, 324)
-    @test mat[1, 1] ≈ mat_noflip[263, 1]
+    # Known corners and a column boundary detect accidental reflection or
+    # row-major decoding independently of a second reshape implementation.
+    @test mat[1, 1] == 1.0
+    @test mat[263, 1] == 263.0
+    @test mat[1, 2] == 264.0
 end
 
 # ===========================================================================

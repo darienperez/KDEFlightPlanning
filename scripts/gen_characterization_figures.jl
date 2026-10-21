@@ -32,8 +32,7 @@ All data is derived from counts.json and stats_and_coverage.csv.
 
 Notes
 -----
-- Line 2 center: row 40 in count grid (SCAN_NROWS=263, SCAN_NCOLS=324)
-- Line 4 center: row 120 in count grid
+- Line centers: derived from planned northings and the original GLI geotransform
 - Band: ±20 rows (40-m band) around each planned line center
 - Primary missions: Const. 2 m/s (const2/NA), KDE-guided Epa (density/E), Const. 8 m/s (const8/NA)
 """
@@ -415,7 +414,7 @@ function make_line_dist_fig(line_num, row_center, out_name_base;
 end
 
 # ─────────────────────────────────────────────────────────────
-# Figure C3: char_line2_return_dist (Line 2, row 40)
+# Figure C3: char_line2_return_dist (Line 2, georeferenced center row)
 # ─────────────────────────────────────────────────────────────
 paths_c3 = String[]
 paths_c4 = String[]
