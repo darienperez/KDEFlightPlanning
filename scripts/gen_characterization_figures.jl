@@ -241,9 +241,14 @@ for (ci, cover) in enumerate(CHAR_COVERS)
         isnothing(col_idx) && continue
         col = parse(Makie.Colors.Colorant, CHAR_MISSIONS[col_idx][4])
         scatter!(ax, [row.cond_mean], [row.CR]; color=col, markersize=14, strokewidth=0.5, strokecolor=:white)
-        text!(ax, "$(first(row.display_label, 9))";
+        short_label = row.mission_key === :density ? "KDE-E" :
+                      row.mission_key === :const2 ? "Const2" : "Const8"
+        at_right_edge = row.cond_mean == maximum(sub.cond_mean)
+        text!(ax, short_label;
               position=(row.cond_mean, row.CR),
-              offset=(4, 2), fontsize=7, color=col)
+              offset=at_right_edge ? (-6, 3) : (6, 3),
+              align=(at_right_edge ? :right : :left, :bottom),
+              fontsize=7, color=col)
     end
 
     if !isempty(sub)
