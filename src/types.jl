@@ -280,7 +280,13 @@ Fields
 - `src_epsg`:      EPSG code for the grid CRS (default 6348 = NAD83(2011)/UTM 18N)
 - `kmed_k`:        k-medoids cluster count (default 2: vegetation vs. non-vegetation)
 - `seed`:          RNG seed for reproducibility (default 6213)
-- `tree_labels`:   Cluster labels corresponding to vegetation (default [1])
+- `tree_labels`:   Cluster labels corresponding to vegetation (default [1]).
+                   Used by callers that build a mask/KDE config directly (e.g.
+                   `run_from_config.jl`, `build_density_surface`). NOTE:
+                   `build_mask_autok` does NOT consult this field as a silent
+                   fallback — pass its own `tree_labels` keyword (or select
+                   interactively) so a missing selection is never turned into
+                   `[1]`.
 - `pca`:           PCA settings NamedTuple: `(variance_ratio, maxoutdim, center)`
 - `kde_bandwidth`: `:auto` (Scott's rule), `:auto_indices` (index-space Scott's), or numeric
 - `kde_kernel`:    `:gaussian` or `:epanechnikov`

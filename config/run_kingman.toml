@@ -1,0 +1,90 @@
+# KDEFlightPlanning run config — Durham NH study site (Perez Martin et al., in prep)
+#
+# This is the manuscript / full-reproduction config. Relative paths are
+# resolved against this file's directory (config/), so "../data/ground_truth/…"
+# points at the bundled summary tables at the repository root.
+#
+# What is bundled vs. what you must supply:
+#   • BUNDLED  data/ground_truth/{counts.json, stats_and_coverage.csv,
+#              percent_densities.csv, E_density_aware__waypoints_xy.csv}
+#              → reproduce the bootstrap CIs + characterization figures with
+#                no extra inputs.
+#   • SUPPLY   [paths].rgb — an orthomosaic GeoTIFF. The full-resolution Durham
+#              ortho and the raw LAS files are NOT bundled (multi-GB). A
+#              lower-resolution ortho is fine; set cluster_stride accordingly.
+#   • OPTIONAL [paths.trajectory] — the large flown-track CSVs (tens of MB each)
+#              needed for the trajectory/tracking figures (Figures 1–3 + main
+#              bootstrap CI figure). Not bundled; the pipeline skips that stage
+#              if they are absent.
+
+[paths]
+# REQUIRED for the planning stage. Replace with your (lower-res) orthomosaic.
+# Placeholder — the full-res Durham ortho is not bundled:
+rgb = "../data/site_images/KF_ortho_P4_2024_01_18_cropped.tif"
+
+# OPTIONAL cover-class GeoTIFF used by the LiDAR counting stage (full pipeline).
+# gli = "../data/GLI_filtered_ortho_1_25_2021__cropped_co_registered_with_field.tif"
+
+# Bundled manuscript ground-truth summary tables (drive bootstrap + figures):
+counts_json           = "../data/ground_truth/counts.json"
+stats_csv             = "../data/ground_truth/stats_and_coverage.csv"
+percent_densities_csv = "../data/ground_truth/percent_densities.csv"
+
+# OPTIONAL 263×324 integer-coded GLI class raster (fixed cover-class
+# denominators in the trajectory line-scan / characterization figures). Not
+# bundled; supply if you have it.
+# gli_class_raster    = "../data/ground_truth/gli_class_263x324.tif"
+
+outdir = "../output/kingman"
+
+[paths.waypoints]
+# Planned E density-aware waypoints (bundled, small). Used to derive planned
+# survey lines in the trajectory stage.
+# Ed = "../data/ground_truth/oxbow/E_density_aware__waypoints_xy.csv"
+
+[paths.trajectory]
+# OPTIONAL flown-track CSVs (NOT bundled — supply your local copies). When
+# present, the unified entry point also generates the trajectory/tracking
+# figures and the main bootstrap CI figure. Keys recognised by the pipeline:
+#   const2  / mission2mps  — constant_speed_2mps__trajectory.csv
+#   missionE / Ed          — E_density_aware__trajectory.csv
+#   const8  / mission8mps  — constant_speed_8mps__trajectory.csv
+# const2   = "../data/trajectories/constant_speed_2mps__trajectory.csv"
+# missionE = "../data/trajectories/E_density_aware__trajectory.csv"
+# const8   = "../data/trajectories/constant_speed_8mps__trajectory.csv"
+
+[paths.lidar]
+# OPTIONAL raw LAS per mission (NOT bundled — multi-GB). Only needed to
+# RECOMPUTE counts.json from scratch; the bundled counts.json is authoritative.
+# Gd     = "../data/lidar/G_density_aware__all_flightlines.las"
+# Gs     = "../data/lidar/G_speed_aware__all_flightlines.las"
+# Ed     = "../data/lidar/E_density_aware__all_flightlines.las"
+# Es     = "../data/lidar/E_speed_aware__all_flightlines.las"
+# const2 = "../data/lidar/constant_speed_2mps__all_flightlines.las"
+# const8 = "../data/lidar/constant_speed_8mps__all_flightlines.las"
+
+[planning]
+seed                   = 6213
+track_spacing_m        = 40.0
+flightlines_spacing_m  = 40.0          # legacy synonym for track_spacing_m
+speed_bounds_mps       = [2.0, 8.0]
+kde_kernel             = "epanechnikov"
+kmedoids_k_range       = [2, 12]
+nsample                = 2000
+min_waypoint_spacing_m = 10.0
+max_waypoint_spacing_m = 30.0
+# Decimate the orthomosaic before clustering. Use 8–16 for a full-res Durham
+# GeoTIFF (~9000×11000); 1 keeps every pixel (fine for a lower-res ortho).
+cluster_stride         = 8
+max_preview_px         = 2000
+report_formats         = ["png"]
+
+# Vegetation cluster ids. The package default is [1] (single cluster); the
+# tree class may span multiple clusters at higher k — set explicitly here
+# after reviewing the cluster overlays.
+tree_labels            = [2]
+
+[gli_class_codes]
+field = 2
+decid = 0
+conif = 1

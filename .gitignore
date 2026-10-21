@@ -1,5 +1,10 @@
 # Generated pipeline artefacts
-/output/
+# /output/durham/kde/kde_density.tif
+# /output/kingman/kde/kde_density.tif
+# /output/hubbard_brook/kde/kde_density.tif
+# /output/oxbow/kde/kde_density.tif
+output/
+
 
 # Julia local / build artefacts
 /LocalPreferences.toml
@@ -7,6 +12,7 @@
 *.jl.*.cov
 *.jl.mem
 deps/deps.jl
+data/
 
 # OS cruft
 .DS_Store

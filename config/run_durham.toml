@@ -20,7 +20,7 @@
 [paths]
 # REQUIRED for the planning stage. Replace with your (lower-res) orthomosaic.
 # Placeholder — the full-res Durham ortho is not bundled:
-rgb = "../data/ortho_2_20_2021_uncorrected_6348_NAD83_19N.tif"
+rgb = "../data/site_images/ortho_2_20_2021_uncorrected_6348_NAD83_19N.tif"
 
 # OPTIONAL cover-class GeoTIFF used by the LiDAR counting stage (full pipeline).
 # gli = "../data/GLI_filtered_ortho_1_25_2021__cropped_co_registered_with_field.tif"
@@ -82,7 +82,7 @@ report_formats         = ["png"]
 # Vegetation cluster ids. The package default is [1] (single cluster); the
 # tree class may span multiple clusters at higher k — set explicitly here
 # after reviewing the cluster overlays.
-tree_labels            = [1]
+tree_labels            = [2]
 
 [gli_class_codes]
 field = 2
