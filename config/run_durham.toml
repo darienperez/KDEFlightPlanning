@@ -7,8 +7,8 @@
 # What is bundled vs. what you must supply:
 #   • BUNDLED  data/ground_truth/{counts.json, stats_and_coverage.csv,
 #              percent_densities.csv, E_density_aware__waypoints_xy.csv}
-#              → reproduce the bootstrap CIs + characterization figures with
-#                no extra inputs.
+#              → reproduce whole-cover characterization figures. Exact
+#                bootstrap CIs additionally require the GLI class raster.
 #   • SUPPLY   [paths].rgb — an orthomosaic GeoTIFF. The full-resolution Durham
 #              ortho and the raw LAS files are NOT bundled (multi-GB). A
 #              lower-resolution ortho is fine; set cluster_stride accordingly.
@@ -30,9 +30,10 @@ counts_json           = "../data/ground_truth/counts.json"
 stats_csv             = "../data/ground_truth/stats_and_coverage.csv"
 percent_densities_csv = "../data/ground_truth/percent_densities.csv"
 
-# OPTIONAL 263×324 integer-coded GLI class raster (fixed cover-class
-# denominators in the trajectory line-scan / characterization figures). Not
-# bundled; supply if you have it.
+# REQUIRED for exact bootstrap CIs and cover-specific line scans. This must be
+# the original 263-row × 324-column class raster, including never-hit cells.
+# It is not bundled. Set this path to your authorized local copy before running
+# manuscript inference. Approximate masks are diagnostics only.
 # gli_class_raster    = "../data/ground_truth/gli_class_263x324.tif"
 
 outdir = "../output/durham"
@@ -84,7 +85,14 @@ report_formats         = ["png"]
 # after reviewing the cluster overlays.
 tree_labels            = [1]
 
+[analysis]
+# No resizing or row-order guessing is performed. Change only if your original
+# class raster was explicitly saved with the opposite row order; positive
+# returns outside their corresponding cover mask will be rejected.
+cover_mask_flip_y = false
+
 [gli_class_codes]
 field = 2
 decid = 0
 conif = 1
+

@@ -18,38 +18,27 @@ coverage ratio (CR) statistic and its pairwise differences, as used in:
 | `seed`       | 42    | RNG seed for reproducibility                         |
 | `level`      | 0.95  | Confidence level (two-sided percentile interval)     |
 
-## Block construction (methodological decision — flagged for author review)
+## Block construction
 
 **Definition:**  `block_frac` is interpreted as the **block side-length fraction**
 of the geometric mean of the grid dimensions:
 
     block_side = round(Int, block_frac × √(nrows × ncols))
 
-For the Durham NH 324 × 263 grid: `√(324 × 263) ≈ 291.8`, so
+For the Durham NH 263 × 324 grid: `√(263 × 324) ≈ 291.8`, so
 `block_side = round(Int, 0.03 × 291.8) = 9` cells.
 
-**Rationale:**  Square blocks of side `s` cover `s²` cells, giving a block area
-of ≈ 0.09% of the raster — approximately 3% linear scale of the domain, which
-matches the spirit of "3% block_frac" as a spatial-scale parameter.  This is the
-most natural interpretation for a 2-D raster; if the intent was area fraction the
-block side would be `round(Int, √(block_frac × N))`.
-
-> ⚠️ **METHODOLOGICAL DECISION — NEEDS AUTHOR APPROVAL BEFORE MANUSCRIPT INTEGRATION**
->
-> `block_frac = 0.03` is interpreted as the block **side-length fraction** of
-> `√(nrows × ncols)`.  For the Durham 324 × 263 grid this gives `block_side = 9`.
-> If Darien prefers the area-fraction interpretation, change `block_side` to
-> `round(Int, √(block_frac * nrows * ncols))`, which gives `block_side = 51`.
-> The current choice (side fraction) produces smaller, more numerous blocks
-> and is common in the spatial statistics literature for moderate autocorrelation
-> ranges.
+This is a block side length of 9 cells, not a 9 × 9 tiling of the whole domain.
+The block-scale choice should be checked against the analysis being reproduced.
 
 ## Resampling procedure
 
 1. Enumerate all non-overlapping `block_side × block_side` starting positions
    in the grid (upper-left corners on a regular grid with stride = `block_side`).
-2. Draw `ceil(N_needed / block_cells)` blocks with replacement, where `N_needed`
-   is determined so that the resampled data covers at least `count(mask)` cells.
+2. Retain blocks intersecting the cover mask and sample these blocks uniformly
+   with replacement until at least `count(mask)` in-mask cells have been drawn.
+   A boundary block contributes only its in-mask cells; the final block may
+   take the resampled support slightly above the target.
 3. For each replicate, compute `CR* = ncells* / N*` where:
    - `ncells*` = number of mask cells in drawn blocks that have counts > 0
    - `N*`      = number of mask cells in drawn blocks
@@ -58,6 +47,12 @@ block side would be `round(Int, √(block_frac × N))`.
 For paired differences (`bootstrap_cr_difference`), the **same** sequence of
 block indices is used for both missions, so the difference CR_A − CR_B inherits
 the spatial dependence structure.
+
+The table APIs require explicit cover masks, retaining cells with zero returns
+in every mission. Positive-return union masks are available only through the
+`allow_approximate_masks=true` diagnostic opt-in. Each output row records the
+support mode and the actual number of support cells. Point estimates and
+bootstrap replicates always use the same spatial support.
 
 ## API
 
@@ -139,6 +134,56 @@ function _block_origins(nrows::Int, ncols::Int, block_side::Int)::Vector{Tuple{I
         end
     end
     return origins
+end
+
+"""
+Precompute nonoverlapping blocks intersecting `mask`, with their in-mask sizes.
+Blocks at raster or cover boundaries are clipped; zero-support blocks are omitted.
+"""
+function _mask_block_catalog(mask::AbstractMatrix{Bool}, block_side::Int)
+    nrows, ncols = size(mask)
+    origins = Tuple{Int,Int}[]
+    sizes = Int[]
+    for (r0, c0) in _block_origins(nrows, ncols, block_side)
+        r1 = min(nrows, r0 + block_side - 1)
+        c1 = min(ncols, c0 + block_side - 1)
+        n = count(@view mask[r0:r1, c0:c1])
+        if n > 0
+            push!(origins, (r0, c0))
+            push!(sizes, n)
+        end
+    end
+    return origins, sizes
+end
+
+"""
+Draw intersecting blocks uniformly with replacement until their cumulative
+in-mask size reaches `target`. Chunked draws and prefix sums avoid repeatedly
+examining raster cells while selecting the sample. Both missions in a paired
+contrast must use the returned sequence.
+"""
+function _sample_mask_blocks(rng::AbstractRNG, block_sizes::Vector{Int}, target::Int)
+    target > 0 || throw(ArgumentError("Resampled support target must be positive"))
+    !isempty(block_sizes) && all(>(0), block_sizes) ||
+        throw(ArgumentError("Sampled blocks must have positive in-mask sizes"))
+
+    sampled = Int[]
+    retained = 0
+    mean_size = sum(block_sizes) / length(block_sizes)
+    while retained < target
+        n_draw = max(1, ceil(Int, (target - retained) / mean_size))
+        chunk = rand(rng, eachindex(block_sizes), n_draw)
+        cumulative = cumsum(block_sizes[chunk])
+        stop = findfirst(n -> retained + n >= target, cumulative)
+        if stop === nothing
+            append!(sampled, chunk)
+            retained += last(cumulative)
+        else
+            append!(sampled, @view chunk[1:stop])
+            retained += cumulative[stop]
+        end
+    end
+    return sampled
 end
 
 """
@@ -260,20 +305,21 @@ Block side length is computed as:
 
     block_side = clamp(round(Int, block_frac × √(nrows × ncols)), 1, min(nrows,ncols))
 
-For the Durham 324 × 263 grid: `block_side = 9`.
+For the Durham 263 × 324 grid: `block_side = 9`.
 
 ## Resampling
 
-Each replicate draws `ceil(count(mask) / (block_side²))` block origins with
-replacement, computes `CR* = n_hit* / n_mask*` over the sampled cells (where
+Each replicate samples mask-intersecting blocks uniformly with replacement
+until the cumulative in-mask support reaches at least `count(mask)`, then
+computes `CR* = n_hit* / n_mask*` over those sampled cells (where
 n_mask* = number of mask cells in drawn blocks, n_hit* = mask cells with count > 0),
 and the CI is the `[(1-level)/2, (1+level)/2]` percentile range.
 
 ## Example
 
 ```julia
-counts = rand(0:5, 324, 263)
-mask   = trues(324, 263)
+counts = rand(0:5, 263, 324)
+mask   = trues(263, 324)
 ci = bootstrap_cr(counts, mask)
 println(ci)
 ```
@@ -305,19 +351,17 @@ function bootstrap_cr(
 
     # Block setup
     block_side = _compute_block_side(nrows, ncols, block_frac)
-    origins    = _block_origins(nrows, ncols, block_side)
-    n_origins  = length(origins)
-    n_draw     = max(1, ceil(Int, N_mask / block_side^2))
+    origins, block_sizes = _mask_block_catalog(mask, block_side)
 
     rng  = MersenneTwister(seed)
     reps = Vector{Float64}(undef, nboot)
 
     for b in 1:nboot
-        idx = rand(rng, 1:n_origins, n_draw)
+        idx = _sample_mask_blocks(rng, block_sizes, N_mask)
         reps[b] = _cr_from_blocks(counts, mask, origins, block_side, idx)
     end
 
-    # Remove NaN replicates (shouldn't happen unless mask is pathological)
+    # Defensive check; nonempty masks produce nonempty-support replicates.
     valid_reps = filter(!isnan, reps)
     if isempty(valid_reps)
         return BootstrapCI(estimate, NaN, NaN, level, nboot, block_side, reps)
@@ -401,15 +445,13 @@ function bootstrap_cr_difference(
     end
 
     block_side = _compute_block_side(nrows, ncols, block_frac)
-    origins    = _block_origins(nrows, ncols, block_side)
-    n_origins  = length(origins)
-    n_draw     = max(1, ceil(Int, N_mask / block_side^2))
+    origins, block_sizes = _mask_block_catalog(mask, block_side)
 
     rng  = MersenneTwister(seed)
     reps = Vector{Float64}(undef, nboot)
 
     for b in 1:nboot
-        idx = rand(rng, 1:n_origins, n_draw)
+        idx = _sample_mask_blocks(rng, block_sizes, N_mask)
         reps[b] = _cr_diff_from_blocks(counts_a, counts_b, mask, origins,
                                         block_side, idx)
     end
@@ -461,14 +503,99 @@ function manuscript_mission_label(mission::Symbol, kernel::Symbol)::String
 end
 
 # ---------------------------------------------------------------------------
+# Cover-support validation for the table APIs
+# ---------------------------------------------------------------------------
+
+"""
+Resolve and validate cover masks without inferring unobserved zero-return cells.
+`cover_n`, when supplied, is an assertion about mask sizes, never a denominator
+override. All provided masks must be Boolean, aligned, and mutually exclusive.
+"""
+function _bootstrap_cover_support(
+    records::Vector{CountRecord},
+    covers::Vector{Symbol},
+    grid_size::Tuple{Int,Int};
+    cover_masks::Union{Nothing,AbstractDict}=nothing,
+    allow_approximate_masks::Bool=false,
+    cover_n::Union{Nothing,AbstractDict}=nothing,
+)
+    valid_covers = (:field, :decid, :conif)
+    isempty(covers) && throw(ArgumentError("At least one cover must be requested"))
+    all(c -> c in valid_covers, covers) ||
+        throw(ArgumentError("Cover keys must be :field, :decid, or :conif"))
+
+    approximate = cover_masks === nothing
+    if approximate && !allow_approximate_masks
+        throw(ArgumentError(
+            "Exact cover_masks are required for bootstrap tables. Supply " *
+            "aligned Boolean masks including zero-return cells, or set " *
+            "allow_approximate_masks=true for positive-return-union diagnostics."))
+    end
+
+    supplied = approximate ? build_cover_masks(records; covers=covers) : cover_masks
+    masks = Dict{Symbol,BitMatrix}()
+    occupied = falses(grid_size)
+    for (cover, mask) in supplied
+        cover in valid_covers ||
+            throw(ArgumentError("Unknown cover-mask key $(repr(cover)); use :field, :decid, or :conif"))
+        mask isa AbstractMatrix{Bool} ||
+            throw(ArgumentError("Mask for $cover must be a Boolean matrix"))
+        size(mask) == grid_size ||
+            throw(DimensionMismatch("Mask for $cover has size $(size(mask)); expected $grid_size"))
+        any(occupied .& mask) &&
+            throw(ArgumentError("Cover masks overlap at one or more cells (including $cover)"))
+        masks[cover] = BitMatrix(mask)
+        occupied .|= mask
+    end
+    for cover in covers
+        haskey(masks, cover) ||
+            throw(ArgumentError("Missing cover mask for $cover"))
+        any(masks[cover]) ||
+            throw(ArgumentError("Cover mask for $cover has no support cells"))
+    end
+
+    for record in records
+        cover = record.key.cover
+        haskey(masks, cover) || continue
+        mask = masks[cover]
+        any(i -> record.matrix[i] > 0 && !mask[i], eachindex(record.matrix, mask)) &&
+            throw(ArgumentError("Positive counts for $(record.key) occur outside the supplied $cover mask"))
+    end
+
+    if cover_n !== nothing
+        for (cover, expected_n) in cover_n
+            cover in valid_covers ||
+                throw(ArgumentError("Unknown cover_n key $(repr(cover))"))
+            haskey(masks, cover) ||
+                throw(ArgumentError("cover_n supplies $cover without a matching mask"))
+            expected_n isa Integer && expected_n >= 0 ||
+                throw(ArgumentError("cover_n[$cover] must be a nonnegative integer"))
+            actual_n = count(masks[cover])
+            expected_n == actual_n ||
+                throw(ArgumentError(
+                    "cover_n[$cover] is $expected_n but the mask contains $actual_n cells; " *
+                    "a total cannot replace missing spatial support"))
+        end
+    end
+
+    support_mode = approximate ? "approximate_positive_union" : "exact"
+    if approximate
+        @warn "Using approximate positive-return-union masks for diagnostics; cells with no returns in every mission are excluded. These outputs are not exact-cover manuscript results."
+    end
+    return masks, support_mode
+end
+
+# ---------------------------------------------------------------------------
 # End-to-end table API: bootstrap_cr_table
 # ---------------------------------------------------------------------------
 
 """
     bootstrap_cr_table(path_json ::AbstractString;
-                       cover_n   ::Dict{Symbol,Int} = DURHAM_COVER_N,
-                       nrows     ::Int = 324,
-                       ncols     ::Int = 263,
+                       cover_masks = nothing,
+                       allow_approximate_masks::Bool = false,
+                       cover_n = nothing,
+                       nrows     ::Int = 263,
+                       ncols     ::Int = 324,
                        nboot     ::Int    = 5000,
                        block_frac::Float64 = 0.03,
                        seed      ::Int    = 42,
@@ -481,22 +608,35 @@ end
 
 Compute block-bootstrap CIs for CR for all rows in `counts.json`.
 
+`cover_masks` maps cover symbols (`:field`, `:decid`, `:conif`) to aligned
+Boolean masks. Requested covers must have nonempty masks, and provided masks
+must not overlap or exclude positive counts belonging to that cover. Cells
+with zero returns in every mission remain in these explicit supports.
+
+The default requires explicit masks. `allow_approximate_masks=true` permits
+positive-return-union masks only when `cover_masks` is absent; such rows are
+labelled `approximate_positive_union`. Optional `cover_n` values validate mask
+sizes and cannot override their denominators.
+
 Returns a `DataFrame` with columns:
 `Cover`, `Return`, `Mission`, `Kernel`, `CR`, `CI_lower`, `CI_upper`,
-`level`, `nboot`, `block_side`.
+`level`, `nboot`, `block_side`, `N`, `support_N`, `support_mode`.
+`CR_bootstrap` is retained as an alias of the point estimate `CR`.
 
 ## Example
 
 ```julia
-df = bootstrap_cr_table("path/to/counts.json")
+df = bootstrap_cr_table("path/to/counts.json"; cover_masks=cover_masks)
 CSV.write("bootstrap_cr_cis.csv", df)
 ```
 """
 function bootstrap_cr_table(
     path_json  ::AbstractString;
-    cover_n    ::Dict{Symbol,Int} = DURHAM_COVER_N,
-    nrows      ::Int = 324,
-    ncols      ::Int = 263,
+    cover_masks::Union{Nothing,AbstractDict} = nothing,
+    allow_approximate_masks::Bool = false,
+    cover_n    ::Union{Nothing,AbstractDict} = nothing,
+    nrows      ::Int = 263,
+    ncols      ::Int = 324,
     nboot      ::Int    = 5000,
     block_frac ::Float64 = 0.03,
     seed       ::Int    = 42,
@@ -510,12 +650,9 @@ function bootstrap_cr_table(
     records   = load_counts_json(path_json; nrows=nrows, ncols=ncols)
     rec_index = Dict{CountKey,Matrix{Int32}}(r.key => r.matrix for r in records)
 
-    # Build approximate cover masks (spatial layout from union of nonzeros)
-    approx_masks = build_cover_masks(records; covers=covers)
-
-    # For CR computation we use the exact N from cover_n (matching manuscript)
-    # Spatial blocks are laid out over the full grid; only mask cells count
-    # We use the same fixed mask that summary_statistics uses.
+    masks, support_mode = _bootstrap_cover_support(records, covers, (nrows, ncols);
+        cover_masks=cover_masks, allow_approximate_masks=allow_approximate_masks,
+        cover_n=cover_n)
 
     is_ka(m) = (m === :const2 || m === :const8)
 
@@ -527,16 +664,9 @@ function bootstrap_cr_table(
             haskey(rec_index, key) || continue
 
             mat  = rec_index[key]
-            mask = approx_masks[cov]
+            mask = masks[cov]
+            N_eff = count(mask)
 
-            # Adjust N to exact polygon size if known
-            N_eff = get(cover_n, cov, count(mask))
-
-            # Compute point estimate with exact N
-            n_hit = count(i -> mask[i] && mat[i] > 0, eachindex(mat, mask))
-            cr_pt = N_eff > 0 ? n_hit / N_eff : 0.0
-
-            # Run bootstrap (uses N from mask cells drawn, not N_eff)
             ci = bootstrap_cr(mat, mask;
                               nboot=nboot, block_frac=block_frac,
                               seed=seed, level=level)
@@ -546,13 +676,16 @@ function bootstrap_cr_table(
                 Return       = return_label(ret),
                 Mission      = mission_label(m),
                 Kernel       = kernel_label(k),
-                CR           = cr_pt,         # manuscript CR (uses DURHAM_COVER_N)
-                CR_bootstrap = ci.estimate,   # bootstrap-internal CR (uses union mask N)
+                CR           = ci.estimate,
+                CR_bootstrap = ci.estimate,
                 CI_lower     = ci.lower,
                 CI_upper     = ci.upper,
                 level        = level,
                 nboot        = nboot,
                 block_side   = ci.block_side,
+                N            = N_eff,
+                support_N    = N_eff,
+                support_mode = support_mode,
             ))
         end
     end
@@ -586,9 +719,11 @@ end
 """
     bootstrap_cr_difference_table(path_json   ::AbstractString,
                                   comparisons ::Vector{Comparison};
-                                  cover_n     ::Dict{Symbol,Int} = DURHAM_COVER_N,
-                                  nrows       ::Int = 324,
-                                  ncols       ::Int = 263,
+                                  cover_masks = nothing,
+                                  allow_approximate_masks::Bool = false,
+                                  cover_n = nothing,
+                                  nrows       ::Int = 263,
+                                  ncols       ::Int = 324,
                                   nboot       ::Int    = 5000,
                                   block_frac  ::Float64 = 0.03,
                                   seed        ::Int    = 42,
@@ -599,10 +734,14 @@ Compute paired block-bootstrap CIs for CR differences for a list of comparisons.
 
 Each comparison specifies two [`CountKey`](@ref) objects; the mask is taken
 from the cover field of `key_a` (both keys must share the same cover type).
+Mask validation and the diagnostic approximation opt-in follow
+[`bootstrap_cr_table`](@ref). The point estimates and confidence intervals
+use the same mask; `cover_n` can only assert that mask's size.
 
 Returns a `DataFrame` with columns:
 `Comparison`, `Cover`, `Return`, `CR_A`, `CR_B`, `CR_diff`,
-`CI_lower`, `CI_upper`, `level`, `nboot`, `block_side`.
+`CI_lower`, `CI_upper`, `level`, `nboot`, `block_side`, `N`, `support_N`,
+`support_mode`. `CR_diff_bootstrap` is retained as an alias of `CR_diff`.
 
 ## Narrative comparisons (Darien's two key contrasts)
 
@@ -619,15 +758,17 @@ comparisons = [
         "KDE-guided Epanechnikov vs Constant 8 m/s"
     ),
 ]
-df = bootstrap_cr_difference_table("counts.json", comparisons)
+df = bootstrap_cr_difference_table("counts.json", comparisons; cover_masks=cover_masks)
 ```
 """
 function bootstrap_cr_difference_table(
     path_json  ::AbstractString,
     comparisons::Vector{Comparison};
-    cover_n    ::Dict{Symbol,Int} = DURHAM_COVER_N,
-    nrows      ::Int = 324,
-    ncols      ::Int = 263,
+    cover_masks::Union{Nothing,AbstractDict} = nothing,
+    allow_approximate_masks::Bool = false,
+    cover_n    ::Union{Nothing,AbstractDict} = nothing,
+    nrows      ::Int = 263,
+    ncols      ::Int = 324,
     nboot      ::Int    = 5000,
     block_frac ::Float64 = 0.03,
     seed       ::Int    = 42,
@@ -639,14 +780,15 @@ function bootstrap_cr_difference_table(
 
     all_covers = unique([c.key_a.cover for c in comparisons] ∪
                         [c.key_b.cover for c in comparisons])
-    approx_masks = build_cover_masks(records;
-                                     covers=collect(all_covers))
+    masks, support_mode = _bootstrap_cover_support(records, collect(all_covers), (nrows, ncols);
+        cover_masks=cover_masks, allow_approximate_masks=allow_approximate_masks,
+        cover_n=cover_n)
 
     rows = NamedTuple[]
     for comp in comparisons
         ka, kb = comp.key_a, comp.key_b
         ka.cover === kb.cover ||
-            @warn "Comparison '$(comp.label)': key_a.cover ($(ka.cover)) ≠ key_b.cover ($(kb.cover)); using key_a.cover mask"
+            throw(ArgumentError("Comparison '$(comp.label)' must use the same cover for both missions"))
 
         haskey(rec_index, ka) ||
             (@warn "Record for key_a not found: $ka"; continue)
@@ -655,8 +797,8 @@ function bootstrap_cr_difference_table(
 
         mat_a = rec_index[ka]
         mat_b = rec_index[kb]
-        mask  = approx_masks[ka.cover]
-        N_eff = get(cover_n, ka.cover, count(mask))
+        mask  = masks[ka.cover]
+        N_eff = count(mask)
 
         n_hit_a = count(i -> mask[i] && mat_a[i] > 0, eachindex(mat_a, mask))
         n_hit_b = count(i -> mask[i] && mat_b[i] > 0, eachindex(mat_b, mask))
@@ -675,15 +817,18 @@ function bootstrap_cr_difference_table(
             Kernel_A         = kernel_label(ka.kernel),
             Mission_B        = mission_label(kb.mission),
             Kernel_B         = kernel_label(kb.kernel),
-            CR_A             = cr_a,          # manuscript CR_A (uses DURHAM_COVER_N)
-            CR_B             = cr_b,          # manuscript CR_B
-            CR_diff          = cr_a - cr_b,   # manuscript CR difference
-            CR_diff_bootstrap= ci.estimate,   # bootstrap-internal CR difference
+            CR_A             = cr_a,
+            CR_B             = cr_b,
+            CR_diff          = ci.estimate,
+            CR_diff_bootstrap= ci.estimate,
             CI_lower         = ci.lower,
             CI_upper         = ci.upper,
             level            = level,
             nboot            = nboot,
             block_side       = ci.block_side,
+            N                = N_eff,
+            support_N        = N_eff,
+            support_mode     = support_mode,
         ))
     end
 
@@ -722,3 +867,4 @@ function default_narrative_comparisons(;
     end
     return comps
 end
+

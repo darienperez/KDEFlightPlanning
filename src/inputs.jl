@@ -72,6 +72,9 @@ Base.@kwdef struct RunInputs
     # Optional 263×324 integer-coded GLI class raster used as fixed cover-class
     # denominators in the trajectory line-scan / characterization figures.
     gli_class_raster     ::Union{String, Nothing} = nothing
+    # Explicit correction for a legacy raster saved in south-up row order.
+    # GeoTIFFs read in their native north-up order normally use false.
+    cover_mask_flip_y    ::Bool = false
 
     # Output directory
     outdir         ::String                 = "output"
@@ -206,6 +209,7 @@ function load_inputs(path::AbstractString)::RunInputs
 
     paths     = get(raw, "paths", Dict{String, Any}())
     planning  = get(raw, "planning", Dict{String, Any}())
+    analysis  = get(raw, "analysis", Dict{String, Any}())
     gli_codes = get(raw, "gli_class_codes", Dict{String, Any}())
 
     # Required
@@ -220,6 +224,9 @@ function load_inputs(path::AbstractString)::RunInputs
                               _resolve(paths["percent_densities_csv"]) : nothing
     gli_class_raster = haskey(paths, "gli_class_raster") ?
                               _resolve(paths["gli_class_raster"]) : nothing
+    cover_mask_flip_y = get(analysis, "cover_mask_flip_y", false)
+    cover_mask_flip_y isa Bool ||
+        throw(ArgumentError("[analysis].cover_mask_flip_y must be true or false"))
     outdir      = haskey(paths, "outdir")      ? _resolve(paths["outdir"])      : abspath(joinpath(base_dir, "output"))
 
     # Dicts of dataset paths (resolve each value relative to base_dir)
@@ -265,6 +272,7 @@ function load_inputs(path::AbstractString)::RunInputs
         stats_csv              = stats_csv,
         percent_densities_csv  = percent_densities_csv,
         gli_class_raster       = gli_class_raster,
+        cover_mask_flip_y      = cover_mask_flip_y,
         outdir                 = outdir,
         seed                   = seed,
         flightlines_spacing_m  = line_spacing,
@@ -445,3 +453,4 @@ function inputs_template(io::IO = stdout)
     print(io, _TEMPLATE_TOML)
     return nothing
 end
+

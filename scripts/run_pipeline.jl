@@ -34,8 +34,11 @@ Options
     --smoke           Build a small synthetic GeoTIFF fixture and run the REAL
                       config-driven pipeline against it (planning) plus the
                       bootstrap and characterization-figure stages against the
-                      bundled ground-truth tables. No large data required;
-                      always succeeds offline.
+                      bundled ground-truth tables. Bootstrap output is
+                      explicitly diagnostic because the exact GLI is absent.
+    --allow-approximate-masks
+                      Opt into diagnostic bootstrap masks when exact GLI
+                      support is unavailable. Never manuscript inference.
     --skip-bootstrap  Skip stage 2 (bootstrap CIs).
     --skip-figures    Skip stage 3 (figure generation).
     -h, --help        Print this message and exit.
@@ -43,8 +46,9 @@ Options
 Data requirements (FULL mode)
     Planning (stage 1) needs [paths].rgb — an orthomosaic GeoTIFF. A
     lower-resolution ortho is fine; set cluster_stride for full-res files.
-    Bootstrap + characterization figures (stages 2, 3a) run from the bundled
-    data/ground_truth/ tables with no extra inputs.
+    Exact bootstrap (stage 2) also needs [paths].gli_class_raster. Whole-cover
+    characterization figures use bundled tables; spatial cover-band figures
+    require that same exact GLI support.
     Trajectory figures (stage 3b) additionally need the large flown-track CSVs
     under [paths.trajectory]; these are NOT bundled. If they are absent the
     stage is skipped (not failed).
@@ -71,6 +75,7 @@ want_help       = any(a -> a in ("-h", "--help"), args)
 smoke           = "--smoke"          in args
 skip_bootstrap  = "--skip-bootstrap" in args
 skip_figures    = "--skip-figures"   in args
+allow_approximate_masks = "--allow-approximate-masks" in args
 positional      = filter(a -> !startswith(a, "-"), args)
 
 if want_help
@@ -155,8 +160,10 @@ inputs = load_inputs(config_path)
 # still sharing the loaded `KDEFlightPlanning` package and the global `ARGS`.
 # ---------------------------------------------------------------------------
 let _stage_counter = Ref(0)
-    global function _run_stage(script::AbstractString, cfg::AbstractString)
+    global function _run_stage(script::AbstractString, cfg::AbstractString;
+                               extra_args::Vector{String}=String[])
         push!(empty!(ARGS), cfg)
+        append!(ARGS, extra_args)
         modname = Symbol("Stage_", _stage_counter[] += 1)
         mod = Core.eval(Main, :(module $modname end))
         Base.include(mod, joinpath(HERE, script))
@@ -179,7 +186,8 @@ catch e
         showerror(stdout, err); println()
         println("Provide [paths].rgb (a lower-res orthomosaic is fine) in")
         println("$config_path, or run with --smoke for an offline demo.")
-        println("Stages 2/3 below still run from the bundled ground-truth tables.")
+        println("Whole-cover figures can use the bundled summary tables.")
+        println("Exact bootstrap and spatial cover-band analyses still require GLI masks.")
         println("!" ^ 72)
     else
         rethrow()
@@ -191,13 +199,8 @@ end
 # ---------------------------------------------------------------------------
 if !skip_bootstrap
     println("\n[2/3] Block-bootstrap CR / ΔCR confidence intervals …")
-    try
-        _run_stage("run_bootstrap.jl", config_path)
-    catch e
-        println("  ⚠ Bootstrap stage could not run: ", sprint(showerror, e))
-        println("    (Ensure data/ground_truth/counts.json exists or set")
-        println("     [paths].counts_json in $config_path, or use --skip-bootstrap.)")
-    end
+    extra = smoke || allow_approximate_masks ? ["--allow-approximate-masks"] : String[]
+    _run_stage("run_bootstrap.jl", config_path; extra_args=extra)
 else
     println("\n[2/3] Bootstrap stage skipped (--skip-bootstrap).")
 end
@@ -217,22 +220,12 @@ if !skip_figures
     println("\n[3/3] Figures …")
 
     println("\n  [3a] Characterization figures (bundled ground truth) …")
-    try
-        _run_stage("gen_characterization_figures.jl", config_path)
-    catch e
-        println("  ⚠ gen_characterization_figures.jl could not run: ",
-                sprint(showerror, e))
-    end
+    _run_stage("gen_characterization_figures.jl", config_path)
 
     if _have_trajectory_inputs(inputs)
         println("\n  [3b] Trajectory analysis + publication figures …")
-        try
-            _run_stage("trajectory_analysis.jl", config_path)
-            _run_stage("make_figures.jl", config_path)
-        catch e
-            println("  ⚠ Trajectory figure stage could not run: ",
-                    sprint(showerror, e))
-        end
+        _run_stage("trajectory_analysis.jl", config_path)
+        _run_stage("make_figures.jl", config_path)
     else
         println("\n  [3b] Trajectory figures SKIPPED — no [paths.trajectory] CSVs found.")
         println("       The large flown-track CSVs are not bundled. To generate")
@@ -248,3 +241,4 @@ println("\n" * "=" ^ 72)
 println("Pipeline complete. Review the output directory for all artefacts:")
 println("  ", inputs.outdir)
 println("=" ^ 72)
+

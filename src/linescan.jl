@@ -10,10 +10,10 @@ Ports the logic from:
 The Durham, NH count-grid has shape (263 rows × 324 columns) in geographic
 (row=north) orientation. The `count_grid` reshape convention in Python is:
 
-    mat = np.array(values).reshape((324, 263), order='C').T   # → (263, 324)
-    mat = np.flipud(mat)                                        # row 0 = north
+    mat = np.array(values).reshape((263, 324), order='F')  # row 0 = north
 
-We replicate this in `decode_count_grid`.
+No row flip is applied: the original GLI class raster confirms this layout
+for all 36 bundled count grids. We replicate it in `decode_count_grid`.
 
 ## API
 
@@ -26,8 +26,8 @@ We replicate this in `decode_count_grid`.
 """
 
 # Grid dimensions (Durham, NH site)
-const SCAN_NROWS = 263
-const SCAN_NCOLS = 324
+const SCAN_NROWS = _LEGACY_COUNT_NROWS
+const SCAN_NCOLS = _LEGACY_COUNT_NCOLS
 
 # Cover codes and manuscript labels
 const COVER_KEYS   = ["field", "decid", "conif"]
@@ -39,37 +39,19 @@ const COVER_LABELS = Dict("field" => "Field", "decid" => "Deciduous", "conif" =>
 # ---------------------------------------------------------------------------
 
 """
-    decode_count_grid(values) → Matrix{Float64}
+    decode_count_grid(values; nrows=263, ncols=324) → Matrix{Float64}
 
 Reshape a flat count-grid `values` vector (length 324 × 263) into a
 (263 × 324) matrix with row 0 at the geographic north, matching the Python
 convention used in the project's `counts.json`.
 
-The reshape order is:
-  1. `reshape(values, 324, 263)'`  → (263 × 324)  [column-major → transpose = C order effect]
-  2. `reverse(mat; dims=1)`        → flip rows so row 1 = northernmost
+Decode the legacy encoding as `reshape(values, nrows, ncols)` with no row flip.
+Use [`load_count_grids`](@ref) for files, which also supports the current writer
+schema and its dimension metadata.
 """
-function decode_count_grid(values::AbstractVector)
-    # Python: reshape((324,263), order='C').T → same as Julia reshape(324,263)' (no, careful)
-    # Python C order reshape(324,263): element [i,j] = values[i*263 + j]
-    # In Julia reshape is column-major: reshape(values, 263, 324) gives [i,j]=values[(j-1)*263+i]
-    # To match Python C-order reshape(324, 263):
-    #   Python result[i, j] = values[i*263 + j]
-    # After .T in Python: result_T[j, i] = values[i*263 + j]
-    # → Julia mat[j, i] = values[i*263 + j]  → mat = reshape(values, 263, 324) with COLUMN-major = wrong
-    # Instead, interpret values as row-major 324×263, then transpose:
-    #   raw[i,j] = values[i*263+j]  (0-indexed)
-    # Julia 1-indexed: raw[i,j] = values[(i-1)*263 + j]
-    # mat = raw'  → mat[j,i] = raw[i,j] = values[(i-1)*263+j]
-    # So mat is (263×324): mat[row, col] = values[(col-1)*263 + row]  ...wait that's column-major reshape
-    # Actually: reshape(values, 263, 324)[row, col] = values[(col-1)*263 + row-1+1]
-    # Python: reshape(values, 324, 263, order='C')[i,j] = values[i*263+j]  (0-indexed)
-    # After .T: [j, i] = values[i*263 + j]
-    # Julia: mat[j+1, i+1] = values[i*263 + j]
-    # Let's build this directly: mat is 263×324
-    # mat[row, col] = values[(col-1)*263 + (row-1)]  ← this is Julia reshape(values,263,324)[row,col] ✓
-    mat = reshape(Float64.(values), SCAN_NROWS, SCAN_NCOLS)  # (263×324) column-major
-    return reverse(mat; dims=1)  # flip: row 1 = northernmost
+function decode_count_grid(values::AbstractVector;
+                           nrows::Integer=SCAN_NROWS, ncols::Integer=SCAN_NCOLS)
+    return _decode_count_values(values, nrows, ncols; layout=:legacy, T=Float64)
 end
 
 
@@ -80,18 +62,113 @@ end
 """
     load_count_grids(counts_json) → Dict{Tuple{String,String,String,String}, Matrix{Float64}}
 
-Load `counts.json` and decode all count grids. Keys are
-`(ret, cover, mission, kernel)` tuples matching the `key` fields in the JSON.
+Load either supported `counts.json` schema using [`load_counts_json`](@ref),
+then return grids keyed by `(ret, cover, mission, kernel)` strings. Optional
+`nrows`/`ncols` are forwarded to the canonical loader for validation.
 """
-function load_count_grids(counts_json::AbstractString)
-    records = JSON.parsefile(counts_json)
+function load_count_grids(counts_json::AbstractString;
+                          nrows::Union{Nothing,Integer}=nothing,
+                          ncols::Union{Nothing,Integer}=nothing)
+    records = load_counts_json(counts_json; nrows=nrows, ncols=ncols)
     out = Dict{NTuple{4,String}, Matrix{Float64}}()
     for r in records
-        key = r["key"]
-        k   = (key["ret"], key["cover"], key["mission"], key["kernel"])
-        out[k] = decode_count_grid(r["matrix"])
+        key = r.key
+        k = (String(key.ret), String(key.cover), String(key.mission), String(key.kernel))
+        out[k] = Float64.(r.matrix)
     end
     return out
+end
+
+
+# ---------------------------------------------------------------------------
+# Shared spatial support and north-up grid geometry
+# ---------------------------------------------------------------------------
+
+"""
+Validate all count grids against fixed cover support, sharing the bootstrap
+validation rules. String and Symbol cover-mask keys are accepted. Returns
+`(masks, support_mode, grid_size)`, with String-keyed Boolean masks.
+"""
+function _line_scan_cover_support(count_grids::AbstractDict;
+                                 cover_masks=nothing,
+                                 allow_approximate_masks::Bool=false)
+    isempty(count_grids) && throw(ArgumentError("At least one count grid is required"))
+    grid_size = size(first(values(count_grids)))
+    length(grid_size) == 2 && all(>(0), grid_size) ||
+        throw(ArgumentError("Count grids must be nonempty matrices"))
+    records = CountRecord[]
+    for (key, matrix) in count_grids
+        length(key) == 4 || throw(ArgumentError("Count-grid keys must have four entries"))
+        matrix isa AbstractMatrix{<:Real} ||
+            throw(ArgumentError("Count grids must be real-valued matrices"))
+        size(matrix) == grid_size ||
+            throw(DimensionMismatch("Count grids must all have the same shape"))
+        all(v -> isfinite(v) && isinteger(v) && v >= 0, matrix) ||
+            throw(ArgumentError("Count grids must contain finite nonnegative integer counts"))
+        ret, cover, mission, kernel = Symbol.(key)
+        push!(records, CountRecord(CountKey(ret=ret, cover=cover,
+                                            mission=mission, kernel=kernel),
+                                   Int32.(matrix)))
+    end
+    supplied = if cover_masks === nothing
+        nothing
+    else
+        normalized = Dict{Symbol,Any}()
+        for (cover, mask) in cover_masks
+            cover isa Union{Symbol,AbstractString} ||
+                throw(ArgumentError("Cover-mask keys must be Strings or Symbols"))
+            name = Symbol(cover)
+            haskey(normalized, name) &&
+                throw(ArgumentError("Duplicate cover-mask key $name"))
+            normalized[name] = mask
+        end
+        normalized
+    end
+    masks, mode = _bootstrap_cover_support(records, Symbol.(COVER_KEYS), grid_size;
+        cover_masks=supplied, allow_approximate_masks=allow_approximate_masks)
+    return Dict(String(key) => mask for (key, mask) in masks), mode, grid_size
+end
+
+"""
+Resolve the true count-grid affine transform. The Durham default is used only
+for its documented grid shape; other grids require an explicit transform or
+both legacy extent overrides. `ymin` is the southern grid edge, never a planned
+line center. Rotated and south-up rasters are rejected rather than guessed.
+"""
+function _line_scan_geotransform(grid_size::Tuple{Int,Int};
+                                   geotransform=nothing,
+                                   xmin::Union{Nothing,Real}=nothing,
+                                   ymin::Union{Nothing,Real}=nothing)
+    if geotransform === nothing && grid_size != (SCAN_NROWS, SCAN_NCOLS) &&
+       (xmin === nothing || ymin === nothing)
+        throw(ArgumentError("Non-Durham count grids require an explicit geotransform"))
+    end
+    # GeoTransform and GT_COUNTGRID are defined later in the module. Resolve
+    # them at call time, after the module has finished loading.
+    base = geotransform === nothing ? GT_COUNTGRID :
+           geotransform isa GeoTransform ? geotransform : GeoTransform(geotransform)
+    all(isfinite, base) || throw(ArgumentError("Grid geotransform must be finite"))
+    base.dx > 0 && base.dy < 0 && base.x_rot == 0 && base.y_rot == 0 ||
+        throw(ArgumentError("Line scans require a north-up, nonrotated grid"))
+    x0 = xmin === nothing ? base.x_origin : Float64(xmin)
+    y0 = ymin === nothing ? base.y_origin : Float64(ymin) - grid_size[1] * base.dy
+    isfinite(x0) && isfinite(y0) ||
+        throw(ArgumentError("Grid extent overrides must be finite"))
+    return GeoTransform(x0, base.dx, 0.0, y0, 0.0, base.dy)
+end
+
+"""One-based row containing northing `y` in a validated north-up transform."""
+function _line_scan_row(y::Real, geotransform)
+    isfinite(y) || throw(ArgumentError("Planned line northing must be finite"))
+    return floor(Int, (Float64(y) - geotransform.y_origin) / geotransform.dy) + 1
+end
+
+function _line_scan_band(y::Real, geotransform, nrows::Int, half_band_rows::Int)
+    half_band_rows >= 0 || throw(ArgumentError("half_band_rows must be nonnegative"))
+    row_center = _line_scan_row(y, geotransform)
+    r0 = max(1, row_center - half_band_rows)
+    r1 = min(nrows, row_center + half_band_rows)
+    return row_center, r0, r1
 end
 
 
@@ -176,7 +253,8 @@ end
 """
     line_scan_cover_metrics(
         count_grids, processed, planned_lines, missions;
-        half_band_rows=20, ymin=nothing, xmin=nothing, cover_masks=nothing
+        half_band_rows=20, geotransform=nothing, ymin=nothing, xmin=nothing,
+        cover_masks=nothing, allow_approximate_masks=false
     ) → (scan_df, cover_df, wide_df, profile_df)
 
 Compute per-line, per-cover-class coverage ratios and column profiles using
@@ -188,12 +266,15 @@ the actual flown x-overlap across missions.
 - `planned_lines`: DataFrame from `derive_planned_lines`
 - `missions`: Vector of `(label, mission_key, kernel_key)` tuples —
   e.g. `[("Const. 2 m/s", "const2", "NA"), ...]`
-- `half_band_rows=20`: envelope half-height in count-grid rows (1 m each)
-- `ymin`, `xmin`: geographic origin of the count grid; if `nothing`, inferred
-  from `planned_lines`
-- `cover_masks`: optional `Dict` keyed by `"field"`, `"decid"`, and `"conif"`;
-  when supplied, CR denominators are fixed GLI class cells rather than support
-  inferred from nonzero return-count cells.
+- `half_band_rows=20`: envelope half-height in count-grid rows.
+- `geotransform`: true north-up count-grid affine transform. Defaults to
+  `GT_COUNTGRID` for the Durham grid; other grid shapes require it explicitly.
+- `ymin`, `xmin`: optional legacy overrides for the southern and western grid
+  edges, respectively. Grid edges are never inferred from planned lines.
+- `cover_masks`: fixed Boolean cover masks keyed by Strings or Symbols;
+  required by default and checked against positive counts.
+- `allow_approximate_masks=false`: explicit diagnostic opt-in for positive-
+  return-union support. All returned tables record `support_mode`.
 
 # Returns
 - `scan_df`: one row per line; includes `common_x_min/max/span`, `n_columns`,
@@ -209,18 +290,24 @@ function line_scan_cover_metrics(
     planned_lines::DataFrame,
     missions::Vector{<:Tuple};
     half_band_rows::Int = 20,
-    ymin::Union{Nothing,Float64} = nothing,
-    xmin::Union{Nothing,Float64} = nothing,
+    geotransform = nothing,
+    ymin::Union{Nothing,Real} = nothing,
+    xmin::Union{Nothing,Real} = nothing,
     cover_masks = nothing,
+    allow_approximate_masks::Bool = false,
 )
-    _ymin = isnothing(ymin) ? minimum(planned_lines.y_center) : ymin
-    _xmin = isnothing(xmin) ? minimum(planned_lines.x_min) : xmin
+    masks, support_mode, grid_size = _line_scan_cover_support(count_grids;
+        cover_masks=cover_masks, allow_approximate_masks=allow_approximate_masks)
+    nrows, ncols = grid_size
+    gt = _line_scan_geotransform(grid_size; geotransform=geotransform,
+                                 xmin=xmin, ymin=ymin)
+    half_band_rows >= 0 || throw(ArgumentError("half_band_rows must be nonnegative"))
 
     extents    = actual_line_extents(processed, planned_lines)
     miss_labels = [m[1] for m in missions]
     overlap    = common_x_overlap(extents, miss_labels)
 
-    x_centers = _xmin .+ (0:(SCAN_NCOLS-1)) .+ 0.5
+    x_centers = gt.x_origin .+ ((0:(ncols-1)) .+ 0.5) .* gt.dx
 
     scan_rows    = Vector{NamedTuple}()
     cover_rows   = Vector{NamedTuple}()
@@ -236,9 +323,8 @@ function line_scan_cover_metrics(
         cols     = findall(col_mask)
         isempty(cols) && continue
 
-        row_center = round(Int, row.y_center - _ymin)
-        r0 = max(1, row_center - half_band_rows + 1)  # 1-based, Julia
-        r1 = min(SCAN_NROWS, row_center + half_band_rows + 1)
+        row_center, r0, r1 = _line_scan_band(row.y_center, gt, nrows, half_band_rows)
+        r0 <= r1 || continue
 
         push!(scan_rows, (
             line_number    = line_number,
@@ -250,23 +336,11 @@ function line_scan_cover_metrics(
             common_x_span_m = common_x1 - common_x0,
             n_columns      = length(cols),
             half_band_rows = half_band_rows,
+            support_mode   = support_mode,
         ))
 
         for cover in COVER_KEYS
-            support = if isnothing(cover_masks)
-                # Legacy fallback when the GLI class raster is unavailable:
-                # infer support from the union of all-return cells. When the
-                # class raster is supplied, use fixed cover-class cells instead.
-                s = falses(r1 - r0 + 1, length(cols))
-                for (_, mission, kernel) in missions
-                    grid = count_grids[("all", cover, mission, kernel)]
-                    s .|= (grid[r0:r1, cols] .>= 1)
-                end
-                s
-            else
-                haskey(cover_masks, cover) || error("cover_masks missing key '$cover'")
-                cover_masks[cover][r0:r1, cols]
-            end
+            support = masks[cover][r0:r1, cols]
 
             for (label, mission, kernel) in missions
                 ground  = count_grids[("ground", cover, mission, kernel)][r0:r1, cols]
@@ -280,6 +354,7 @@ function line_scan_cover_metrics(
                     support_cells  = sup_n,
                     covered_cells  = cov_n,
                     coverage_ratio = sup_n > 0 ? cov_n / sup_n : NaN,
+                    support_mode   = support_mode,
                 ))
                 for (jj, col) in enumerate(cols)
                     sup_col = view(support, :, jj)
@@ -295,6 +370,7 @@ function line_scan_cover_metrics(
                         support_cells    = sup_n_c,
                         covered_cells    = cov_n_c,
                         coverage_fraction = sup_n_c > 0 ? cov_n_c / sup_n_c : NaN,
+                        support_mode     = support_mode,
                     ))
                 end
             end
@@ -319,7 +395,8 @@ end
 """
     single_line_cover_metrics(
         count_grids, processed, planned_lines, missions, line_number;
-        half_band_rows=20, ymin=nothing, xmin=nothing, cover_masks=nothing
+        half_band_rows=20, geotransform=nothing, ymin=nothing, xmin=nothing,
+        cover_masks=nothing, allow_approximate_masks=false
     ) → (extents_df, cover_df, profile_df)
 
 Compute cover metrics and column profile for a single survey line using the
@@ -334,12 +411,18 @@ function single_line_cover_metrics(
     missions::Vector{<:Tuple},
     line_number::Int;
     half_band_rows::Int = 20,
-    ymin::Union{Nothing,Float64} = nothing,
-    xmin::Union{Nothing,Float64} = nothing,
+    geotransform = nothing,
+    ymin::Union{Nothing,Real} = nothing,
+    xmin::Union{Nothing,Real} = nothing,
     cover_masks = nothing,
+    allow_approximate_masks::Bool = false,
 )
-    _ymin = isnothing(ymin) ? minimum(planned_lines.y_center) : ymin
-    _xmin = isnothing(xmin) ? minimum(planned_lines.x_min) : xmin
+    masks, support_mode, grid_size = _line_scan_cover_support(count_grids;
+        cover_masks=cover_masks, allow_approximate_masks=allow_approximate_masks)
+    nrows, ncols = grid_size
+    gt = _line_scan_geotransform(grid_size; geotransform=geotransform,
+                                 xmin=xmin, ymin=ymin)
+    half_band_rows >= 0 || throw(ArgumentError("half_band_rows must be nonnegative"))
 
     line_row = planned_lines[planned_lines.line_number .== line_number, :]
     isempty(line_row) && error("Line number $line_number not found in planned_lines")
@@ -360,6 +443,7 @@ function single_line_cover_metrics(
             y_median_actual = median(g.GridY),
             samples         = nrow(g),
             segments        = length(unique(g.segment_id)),
+            support_mode    = support_mode,
         ))
     end
     extents_df = DataFrame(ext_rows)
@@ -367,28 +451,18 @@ function single_line_cover_metrics(
     common_x0 = maximum(extents_df.x_min_actual)
     common_x1 = minimum(extents_df.x_max_actual)
 
-    x_centers   = _xmin .+ (0:(SCAN_NCOLS-1)) .+ 0.5
+    x_centers = gt.x_origin .+ ((0:(ncols-1)) .+ 0.5) .* gt.dx
     selected    = findall((x_centers .>= common_x0) .& (x_centers .<= common_x1))
+    isempty(selected) && throw(ArgumentError("Survey overlap does not include a count-grid column"))
 
-    row_center = round(Int, Float64(line_row.y_center) - _ymin)
-    r0 = max(1, row_center - half_band_rows + 1)
-    r1 = min(SCAN_NROWS, row_center + half_band_rows + 1)
+    row_center, r0, r1 = _line_scan_band(line_row.y_center, gt, nrows, half_band_rows)
+    r0 <= r1 || throw(ArgumentError("Survey line band does not intersect the count grid"))
 
     cover_rows   = Vector{NamedTuple}()
     profile_rows = Vector{NamedTuple}()
 
     for cover in COVER_KEYS
-        support = if isnothing(cover_masks)
-            s = falses(r1 - r0 + 1, length(selected))
-            for (_, mission, kernel) in missions
-                grid = count_grids[("all", cover, mission, kernel)]
-                s .|= (grid[r0:r1, selected] .>= 1)
-            end
-            s
-        else
-            haskey(cover_masks, cover) || error("cover_masks missing key '$cover'")
-            cover_masks[cover][r0:r1, selected]
-        end
+        support = masks[cover][r0:r1, selected]
 
         for (label, mission, kernel) in missions
             ground  = count_grids[("ground", cover, mission, kernel)][r0:r1, selected]
@@ -402,6 +476,7 @@ function single_line_cover_metrics(
                 support_cells  = sup_n,
                 covered_cells  = cov_n,
                 coverage_ratio = sup_n > 0 ? cov_n / sup_n : NaN,
+                support_mode   = support_mode,
             ))
             for (jj, col) in enumerate(selected)
                 sup_col = view(support, :, jj)
@@ -417,6 +492,7 @@ function single_line_cover_metrics(
                     support_cells    = sup_n_c,
                     covered_cells    = cov_n_c,
                     coverage_fraction = sup_n_c > 0 ? cov_n_c / sup_n_c : NaN,
+                    support_mode     = support_mode,
                 ))
             end
         end
@@ -456,6 +532,11 @@ function _build_wide_df(cover_df::DataFrame, scan_df::DataFrame)
     # Add min_support_cells from cover_df
     min_sup = combine(groupby(cover_df, [:line_number, :cover]), :support_cells => minimum => :min_support_cells)
     wide    = leftjoin(wide, min_sup; on=[:line_number, :cover])
+    if hasproperty(cover_df, :support_mode)
+        modes = unique(cover_df.support_mode)
+        length(modes) == 1 || throw(ArgumentError("Line-scan tables mix support modes"))
+        wide[!, :support_mode] = fill(only(modes), nrow(wide))
+    end
 
     # Compute best_forest ranking and merge into scan_df
     forest = wide[map(c -> c ∈ ["Deciduous", "Coniferous"], wide.cover), :]
@@ -479,3 +560,4 @@ function _build_wide_df(cover_df::DataFrame, scan_df::DataFrame)
 
     return wide
 end
+

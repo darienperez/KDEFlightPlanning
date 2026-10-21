@@ -30,10 +30,11 @@ When calling `summary_statistics(grid, mask)` without the original raster:
 
 - If you have the cover-polygon mask (BitMatrix), pass it directly.
 - If you only have `counts.json`, reconstruct a per-cover mask by taking the
-  **union of all nonzero positions** across every record for that cover.  This
-  recovers `N` to within ≤ 1 cell of the true polygon size (the small discrepancy
-  arises from cells inside the polygon that received zero returns in every mission).
-  `summarize_counts_json` does this automatically and documents the approach.
+  **union of all nonzero positions** across every record for that cover only
+  for an approximation. Cells with zero returns in every mission are absent
+  from that union. `summarize_counts_json` can use known cover areas for scalar
+  CR summaries, but these areas cannot restore missing spatial support for
+  bootstrap or line-scan inference. Supply exact masks for those analyses.
 
 ## Neighbor convention for Moran's I
 
@@ -50,11 +51,13 @@ This exactly matches the `morans_I` implementation in `lidar.jl`.
 
 ## Grid layout
 
-The flat vector in `counts.json` is stored in row-major order with shape (324, 263)
-— i.e. `reshape(vec, 324, 263)` in Julia (row=324, col=263).  All scalar
-statistics (quartiles, mean, Gini, CV, CR) are orientation-invariant.  Moran's I
-uses 2-D position, so the reshape must be consistent; `summarize_counts_json`
-handles this automatically.
+Decoded matrices use `(rows, columns)` with north in the first row. Legacy
+`counts.json` array records are decoded as
+`reshape(values, 263, 324)` (column-major, no row flip), verified against the
+original GLI class raster. The current writer's object schema
+declares `nrows` and `ncols` and stores row-major values, decoded without a row
+flip. All consumers use the same decoder. Scalar statistics are invariant to
+orientation, but spatial adjacency and block placement require this layout.
 """
 
 # ---------------------------------------------------------------------------
@@ -104,6 +107,35 @@ cover_label(c::Symbol) =
     c === :field ? "Field"      :
     c === :decid ? "Deciduous"  :
     c === :conif ? "Coniferous" : String(c)
+
+# Primary missions in the characterization figures. CSV labels remain those
+# produced by mission_label/kernel_label; display labels are presentation only.
+const CHARACTERIZATION_MISSIONS = (
+    (mission=:const2,  kernel=:NA, display_label="Const. 2 m/s"),
+    (mission=:density, kernel=:E,  display_label="KDE-guided (Epanechnikov)"),
+    (mission=:const8,  kernel=:NA, display_label="Const. 8 m/s"),
+)
+
+"""
+    characterization_stats(stats::AbstractDataFrame) -> DataFrame
+
+Select the three primary characterization missions from a summary CSV and add
+canonical `mission_key`, `kernel_key`, and `display_label` columns. Gaussian and
+speed-aware variants are excluded. `cond_mean` copies `Mean`, which is already
+computed over covered cells only; it must not be divided by coverage ratio.
+The input table is not modified.
+"""
+function characterization_stats(stats::AbstractDataFrame)
+    missions = Dict((mission_label(m.mission), kernel_label(m.kernel)) => m
+                    for m in CHARACTERIZATION_MISSIONS)
+    primary = filter(row -> haskey(missions, (row.Mission, row.Kernel)), stats)
+    metadata = [missions[(row.Mission, row.Kernel)] for row in eachrow(primary)]
+    primary[!, :mission_key] = [m.mission for m in metadata]
+    primary[!, :kernel_key] = [m.kernel for m in metadata]
+    primary[!, :display_label] = [m.display_label for m in metadata]
+    primary[!, :cond_mean] = copy(primary.Mean)
+    return primary
+end
 
 # ---------------------------------------------------------------------------
 # Gini coefficient (matches lidar.jl formula exactly)
@@ -405,52 +437,87 @@ end
 # load_counts_json — parse counts.json
 # ---------------------------------------------------------------------------
 
+const _LEGACY_COUNT_NROWS = 263
+const _LEGACY_COUNT_NCOLS = 324
+
+function _count_grid_dimension(value, name)
+    value isa Integer && !(value isa Bool) && value > 0 ||
+        throw(ArgumentError("$name must be a positive integer"))
+    return Int(value)
+end
+
+function _decode_count_values(values::AbstractVector, nrows::Integer, ncols::Integer;
+                              layout::Symbol, T::Type=Int32)
+    nr = _count_grid_dimension(nrows, "nrows")
+    nc = _count_grid_dimension(ncols, "ncols")
+    length(values) == nr * nc || throw(DimensionMismatch(
+        "Count grid has $(length(values)) elements; expected $(nr * nc) ($nr×$nc)"))
+    if layout === :legacy
+        return reshape(T.(values), nr, nc)
+    elseif layout === :rowmajor
+        return permutedims(reshape(T.(values), nc, nr))
+    end
+    throw(ArgumentError("Unknown count-grid layout: $layout"))
+end
+
 """
-    load_counts_json(path::AbstractString;
-                     nrows::Int=324, ncols::Int=263) -> Vector{CountRecord}
+    load_counts_json(path::AbstractString; nrows=nothing, ncols=nothing)
+        -> Vector{CountRecord}
 
-Parse `counts.json` (produced by `lidar.jl`) into a `Vector{CountRecord}`.
+Load either supported `counts.json` schema into `(rows, columns)` matrices:
 
-Each JSON object has the form:
-```json
-{"key": {"ret":"ground","cover":"conif","mission":"speed","kernel":"E"},
- "matrix": [0, 0, 3, ...]}
-```
+- Legacy array: each record has a `key` object and flat `matrix` vector. The
+  historical encoding is column-major and is decoded with
+  `reshape(values, nrows, ncols)`, defaulting to the Durham grid of 263 rows ×
+  324 columns. Its rows already match the original north-up GLI raster.
+- Current writer object: `nrows`, `ncols`, and `records`, whose records contain
+  `ret`, `cover`, `mission`, `kernel`, and row-major `values`. Dimensions come
+  from metadata and decoding preserves the written row order.
 
-The flat `matrix` vector is reshaped to `(nrows, ncols)` in row-major order
-(equivalent to `reshape(vec, nrows, ncols)` in Julia's column-major layout
-applied as row-major: use `permutedims(reshape(vec, ncols, nrows))`).
-
-Default grid size: **324 rows × 263 columns** (85 212 cells), matching the
-Durham NH study site raster.  Override `nrows`/`ncols` for other sites.
-
-!!! note
-    The JSON matrix values are integers.  They are stored as `Int32` in the
-    returned `CountRecord.matrix` fields.
+Explicit dimensions must be positive and must agree with object metadata and
+record lengths. Returned counts are `Int32`; row 1 is the northernmost row for
+the bundled legacy data and the current north-up writer output.
 """
 function load_counts_json(path::AbstractString;
-                          nrows::Int=324, ncols::Int=263)::Vector{CountRecord}
+                          nrows::Union{Nothing,Integer}=nothing,
+                          ncols::Union{Nothing,Integer}=nothing)::Vector{CountRecord}
     raw = JSON.parsefile(path)
-    records = Vector{CountRecord}(undef, length(raw))
-    expected_len = nrows * ncols
+    if raw isa AbstractVector
+        objects = raw
+        nr = _count_grid_dimension(something(nrows, _LEGACY_COUNT_NROWS), "nrows")
+        nc = _count_grid_dimension(something(ncols, _LEGACY_COUNT_NCOLS), "ncols")
+        layout = :legacy
+    elseif raw isa AbstractDict
+        all(key -> haskey(raw, key), ("nrows", "ncols", "records")) ||
+            throw(ArgumentError("Count-grid object must contain nrows, ncols, and records"))
+        nr = _count_grid_dimension(raw["nrows"], "metadata nrows")
+        nc = _count_grid_dimension(raw["ncols"], "metadata ncols")
+        for (name, supplied, stored) in (("nrows", nrows, nr), ("ncols", ncols, nc))
+            if supplied !== nothing
+                requested = _count_grid_dimension(supplied, name)
+                requested == stored || throw(DimensionMismatch(
+                    "Requested $name=$requested disagrees with count-grid metadata $name=$stored"))
+            end
+        end
+        objects = raw["records"]
+        objects isa AbstractVector || throw(ArgumentError("records must be an array"))
+        layout = :rowmajor
+    else
+        throw(ArgumentError("counts.json must contain a legacy array or a count-grid object"))
+    end
 
-    for (i, obj) in enumerate(raw)
-        kd = obj["key"]
+    records = Vector{CountRecord}(undef, length(objects))
+    for (i, obj) in enumerate(objects)
+        kd = layout === :legacy ? obj["key"] : obj
         key = CountKey(
             ret     = Symbol(kd["ret"]),
             cover   = Symbol(kd["cover"]),
             mission = Symbol(kd["mission"]),
             kernel  = Symbol(kd["kernel"]),
         )
-        vec_raw = obj["matrix"]::Vector
-        length(vec_raw) == expected_len ||
-            throw(DimensionMismatch(
-                "Record $i has $(length(vec_raw)) elements; " *
-                "expected $expected_len ($(nrows)×$(ncols))"))
-        # JSON stores row-major; Julia is column-major.
-        # reshape(vec, ncols, nrows) gives a ncols×nrows matrix where each
-        # "column" is one row of the original row-major array; transpose gives nrows×ncols.
-        mat = permutedims(reshape(Int32.(vec_raw), ncols, nrows))
+        vec_raw = obj[layout === :legacy ? "matrix" : "values"]
+        vec_raw isa AbstractVector || throw(ArgumentError("Record $i values must be an array"))
+        mat = _decode_count_values(vec_raw, nr, nc; layout=layout)
         records[i] = CountRecord(key, mat)
     end
     return records
@@ -469,8 +536,9 @@ Reconstruct per-cover zone masks from count records by taking the union of
 all nonzero positions across every record for each cover.
 
 This is an approximation of the true polygon mask (which comes from the
-classified raster in `lidar.jl`).  The result may differ by up to a handful
-of cells for zones where some cells received zero returns in every mission.
+classified raster in `lidar.jl`). It excludes cells that received zero returns
+in every mission and is not a substitute for the spatial support used in
+manuscript inference.
 
 For the Durham NH study site the known discrepancies are:
 - `:conif` — 1 cell (union gives 5412; true N = 5413)
@@ -507,7 +575,7 @@ end
 """
     DURHAM_COVER_N :: Dict{Symbol, Int}
 
-True cover-polygon cell counts for the Durham NH study site (324 × 263 grid).
+True cover-polygon cell counts for the Durham NH study site (263 × 324 grid).
 These are derived from the classified raster (`classes .== CLASS_CODE`) and
 match the `N` column in `stats_and_coverage.csv`:
 
@@ -552,8 +620,8 @@ end
 """
     summarize_counts_json(path::AbstractString;
                           cover_n    ::Dict{Symbol,Int} = DURHAM_COVER_N,
-                          nrows      ::Int = 324,
-                          ncols      ::Int = 263,
+                          nrows = nothing,
+                          ncols = nothing,
                           neighbor   ::Symbol = :queen,
                           covers     ::Vector{Symbol} = [:field, :decid, :conif],
                           returns    ::Vector{Symbol} = [:all, :ground],
@@ -572,7 +640,7 @@ Arguments
                 Defaults to [`DURHAM_COVER_N`](@ref) (Durham NH site).
                 Pass `nothing` to estimate N from the data union (slightly
                 underestimates N for cells that are always zero).
-- `nrows/ncols` — raster grid dimensions (default 324 × 263)
+- `nrows/ncols` — optional dimensions; metadata or legacy default 263 × 324
 - `neighbor`  — adjacency for Moran's I (`:queen` matches `lidar.jl`)
 - `covers / returns / missions / kernels` — subset to compute
 
@@ -590,8 +658,8 @@ CSV.write("regenerated_stats.csv", df)
 """
 function summarize_counts_json(path     ::AbstractString;
                                 cover_n  ::Union{Dict{Symbol,Int},Nothing}=DURHAM_COVER_N,
-                                nrows    ::Int=324,
-                                ncols    ::Int=263,
+                                nrows    ::Union{Nothing,Integer}=nothing,
+                                ncols    ::Union{Nothing,Integer}=nothing,
                                 neighbor ::Symbol=:queen,
                                 covers   ::Vector{Symbol}=[:field,:decid,:conif],
                                 returns  ::Vector{Symbol}=[:all,:ground],
@@ -748,3 +816,4 @@ function write_summary_csv(path   ::AbstractString,
     CSV.write(path, df; kwargs...)
     return path
 end
+
