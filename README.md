@@ -9,7 +9,7 @@ The package implements a KDE-guided adaptive flight-planning pipeline and the
 statistical analysis used to evaluate it:
 
 k-medoids clustering of an orthomosaic (CIELAB colorspace) → KDE density surface
-(Epanechnikov kernel, Silverman's rule) → normalized speed map (2–8 m/s) with
+(Epanechnikov kernel, Scott-style index bandwidth) → normalized speed map (2–8 m/s) with
 curvature/gradient-based waypoint spacing → coverage-ratio (CR) evaluation with
 block-bootstrap confidence intervals.
 
@@ -53,7 +53,8 @@ It orchestrates every stage in order and delegates to the package functions in
 `src/` (no analysis logic is re-implemented in the script):
 
 1. **Ingest → mask → KDE → speed map → waypoints** (data-driven; `run_from_config.jl`)
-2. **Block-bootstrap CR / ΔCR confidence intervals** (`scripts/run_bootstrap.jl`)
+2. **Block-bootstrap CR / ΔCR confidence intervals** (`scripts/run_bootstrap.jl`;
+   requires the original GLI cover masks for manuscript inference).
 3. **Figures** (CairoMakie):
    - **3a** Characterisation figures — from the bundled ground-truth tables only.
    - **3b** Trajectory analysis + publication figures (Figures 1–3 + the main
@@ -69,7 +70,8 @@ julia --project=. scripts/run_pipeline.jl [CONFIG] [options]
 | Argument / option   | Meaning                                                                 |
 | ------------------- | ----------------------------------------------------------------------- |
 | `CONFIG`            | Path to a `RunInputs` TOML config. Default: `config/run_durham.toml`.   |
-| `--smoke`           | Synthetic, no-large-data path (always succeeds offline).                |
+| `--smoke`           | Synthetic planning demo and explicitly diagnostic bootstrap output.    |
+| `--allow-approximate-masks` | Opt into diagnostic positive-return-union masks when the exact GLI is unavailable. |
 | `--skip-bootstrap`  | Skip stage 2.                                                           |
 | `--skip-figures`    | Skip stage 3.                                                           |
 | `-h`, `--help`      | Print usage and exit.                                                   |
@@ -90,13 +92,19 @@ julia --project=. scripts/run_pipeline.jl --help
 `--smoke` builds a small **synthetic GeoTIFF fixture** and runs the *real*,
 config-driven planning pipeline against it, then runs the bootstrap and
 characterisation-figure stages against the bundled ground-truth tables. It
-needs no large data and always succeeds offline.
+needs no large data after dependencies are installed. Its approximate bootstrap
+outputs are saved under `bootstrap/diagnostic/`, carry
+`support_mode = approximate_positive_union`, and are **not manuscript CIs**.
+The synthetic fixture never substitutes for the Durham GLI cover map.
 
 If a required input declared in the config is missing, the affected stage is
 reported as skipped (the planning stage prints a clear `MissingInputError`
-naming the absent file/key, and stages 2–3a still run from the bundled
-ground-truth tables). **No results are invented** — missing large data simply
-means the corresponding stage is skipped.
+naming the absent file/key). Whole-cover characterization figures can use the
+bundled tables, but exact bootstrap inference requires the original cover map.
+The requested bootstrap stage stops if that map is absent; use
+`--skip-bootstrap` for summary figures only, or explicitly opt into diagnostics.
+Unexpected errors in requested stages propagate instead of reporting a
+successful reproduction.
 
 ---
 
@@ -120,6 +128,12 @@ paths are resolved **relative to the config file's directory**, so the bundled
   `kmedoids_k_range`, waypoint-spacing bounds, `cluster_stride`, `tree_labels`,
   `report_formats`.
 - `[gli_class_codes]` — GLI raster class codes for field / deciduous / coniferous.
+- `[paths].gli_class_raster` — the original 263-row × 324-column categorical
+  cover raster, including cells with zero returns in every mission. Required
+  for exact bootstrap and cover-specific spatial analyses; it is not bundled.
+- `[analysis].cover_mask_flip_y` — explicit row-order correction for a known
+  legacy raster only (default `false`). Class values are read without scaling,
+  resizing, or resampling; class `0` remains deciduous, not missing data.
 
 The only path you must supply for the full planning stage is `[paths].rgb`; the
 packaged config ships with a placeholder filename (the full-resolution Durham
@@ -129,11 +143,11 @@ ortho is not bundled).
 
 ## Inputs and outputs
 
-**Bundled under `data/ground_truth/`** (small; reproduce the bootstrap CIs and
-characterisation figures with no extra inputs):
+**Bundled under `data/ground_truth/`** (derived inputs for the analyses):
 
-- `counts.json` — cover × mission ground-return count grids (263×324). Treated
-  as **ground truth**; never recomputed from unavailable raw data.
+- `counts.json` — cover × mission return-count grids (263×324). The legacy
+  vectors decode to the same north-up matrix in every analysis. The schema
+  written by `write_count_grids_json` is also supported and records its shape.
 - `stats_and_coverage.csv`, `percent_densities.csv` — manuscript summary tables.
 - `E_density_aware__waypoints_xy.csv` — planned KDE-guided waypoints.
 
@@ -143,15 +157,17 @@ characterisation figures with no extra inputs):
   **not** bundled (multi-GB); a lower-resolution ortho is fine — set
   `cluster_stride` to taste.
 
-**Optional (not bundled):**
+**Additional inputs (not bundled):**
 
 - The large flown-track trajectory CSVs (`[paths.trajectory]`, tens of MB each)
   — needed only for the trajectory/tracking figures (Figures 1–3 + the main
   bootstrap CI figure).
 - Raw per-mission LAS files (`[paths.lidar]`, multi-GB) — needed only to
   recompute `counts.json` from scratch.
-- GLI cover-class GeoTIFF / `gli_class_raster` — optional external cover ground
-  truth and fixed line-scan CR denominators.
+- GLI cover-class GeoTIFF / `gli_class_raster` — required for exact bootstrap
+  support and fixed line-scan CR denominators. Counts alone cannot locate cells
+  that received no returns in any mission; fixed cover-area totals cannot
+  replace that missing spatial information.
 
 The large raw rasters, LAS files, and trajectory CSVs are **not** required for
 the test suite or the smoke run.
@@ -160,7 +176,9 @@ the test suite or the smoke run.
 
 - KDE density surface, speed map, and per-mission waypoint CSVs (planning stage).
 - `bootstrap/` — block-bootstrap CR / ΔCR confidence intervals
-  (n = 5000, block_frac = 3%, seed = 42).
+  (n = 5000, block_frac = 3%, seed = 42), using exact GLI support. Each CSV
+  records `N`, `support_N`, and `support_mode`. The optional positive-union
+  diagnostics use a separate `bootstrap/diagnostic/` directory.
 - `figures/` — characterisation figures, plus (if the trajectory CSVs are
   supplied) the publication and tracking figures.
 - `trajectory/` — trajectory-analysis CSVs (only when `[paths.trajectory]` is
@@ -232,6 +250,21 @@ export KDE_TEST_WAYPOINTS_CSV=/path/to/E_density_aware__waypoints_xy.csv
 ## Reproducibility notes
 
 - Block-bootstrap inference uses n = 5000 resamples, block_frac = 3%, seed = 42.
+- Blocks intersecting the fixed cover mask are sampled with replacement until
+  at least the original number of cover cells has been retained. Paired
+  comparisons use the same sampled blocks for both missions. CR estimates and
+  their intervals use the same spatial support, including never-hit cells.
+- Point estimates are observed CR values or observed CR differences; bootstrap
+  replicates provide percentile intervals. They are not reported as the mean
+  of the bootstrap replicates.
+- Characterization plots select missions by canonical CSV labels and kernel
+  identifiers. The CSV `Mean` is already conditional on covered cells and is
+  used directly, without dividing by CR.
+- The exact GLI raster and large source datasets are not bundled. Exact
+  manuscript CIs must be regenerated with the original mask and compared with
+  the submitted values; synthetic or approximate outputs do not establish that
+  comparison.
 - Smoke/diagnostic outputs are labelled as such and must **not** be used for
   primary inferential claims; GLI remains the primary external cover
   ground-truth reference (Sullivan et al. 2023, DOI 10.3390/rs15215091).
+

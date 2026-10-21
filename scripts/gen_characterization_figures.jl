@@ -23,7 +23,7 @@ Usage
 Data required (bundled under data/ground_truth/, or set via config):
   counts.json              — per-cell return count grids (36 entries)
   stats_and_coverage.csv   — precomputed stats per (cover, return, mission, kernel)
-  gli_class_raster         — optional 263×324 integer-coded GLI raster
+  gli_class_raster         — 263×324 integer-coded GLI raster required for C3/C4
                              (0=deciduous, 1=coniferous, 2=field) for fixed
                              class-specific line-band CR denominators.
 
@@ -44,7 +44,6 @@ Pkg.activate(joinpath(@__DIR__, ".."))
 using KDEFlightPlanning
 using CSV, DataFrames, JSON, Statistics
 using CairoMakie
-using FileIO, ImageIO, ColorTypes
 
 include(joinpath(@__DIR__, "ground_truth.jl"))
 
@@ -63,48 +62,14 @@ const NCOLS = SCAN_NCOLS   # 324
 
 # Mission and cover display constants (matching figures.jl palette)
 const CHAR_MISSIONS = [
-    ("const2",   "NA",  "Const. 2 m/s",             "#A84B2F"),
-    ("density",  "E",   "KDE-guided (Epanechnikov)", "#20808D"),
-    ("const8",   "NA",  "Const. 8 m/s",             "#1B474D"),
+    (String(m.mission), String(m.kernel), m.display_label, color)
+    for (m, color) in zip(KDEFlightPlanning.CHARACTERIZATION_MISSIONS,
+                          ("#A84B2F", "#20808D", "#1B474D"))
 ]
 const CHAR_COVERS = ["Field", "Deciduous", "Coniferous"]
 const COVER_KEYS  = ["field", "decid", "conif"]
 const FIG_BG      = "#F7F4EF"
 const COL_GRID    = "#DDDAD3"
-
-function _class_value(px)
-    if px isa Colorant
-        return round(Int, Float64(red(px)) * 255)
-    elseif px isa Number
-        x = Float64(px)
-        return round(Int, x <= 1 ? x * 255 : x)
-    else
-        error("Unsupported GLI pixel type: $(typeof(px))")
-    end
-end
-
-function load_gli_cover_masks(path::AbstractString)
-    isempty(path) && return nothing
-    isfile(path) || error("GLI_CLASS_PATH does not exist: $path")
-    img = FileIO.load(path)
-    expected_size = (NROWS, NCOLS)
-    size(img) == expected_size ||
-        error("GLI class raster has size $(size(img)); expected $(expected_size)")
-
-    classes = Matrix{Int}(undef, size(img)...)
-    for I in CartesianIndices(img)
-        classes[I] = _class_value(img[I])
-    end
-
-    # Align the attached image row order to decoded count-grid row order.
-    classes = reverse(classes; dims = 1)
-
-    return Dict(
-        "decid" => classes .== 0,
-        "conif" => classes .== 1,
-        "field" => classes .== 2,
-    )
-end
 
 # ─────────────────────────────────────────────────────────────
 # Load data
@@ -119,10 +84,18 @@ stats_path = require_ground_truth(_GT, :stats_csv, "stats_and_coverage.csv")
 stats_df = CSV.read(stats_path, DataFrame)
 println("  $(nrow(stats_df)) rows")
 
-cover_masks = load_gli_cover_masks(GLI_CLASS_PATH)
+class_codes = isnothing(_GT.inputs) ? Dict(:field=>2, :decid=>0, :conif=>1) :
+                                     _GT.inputs.gli_class_codes
+flip_y = !isnothing(_GT.inputs) && _GT.inputs.cover_mask_flip_y
+cover_masks = isempty(GLI_CLASS_PATH) ? nothing : Dict(
+    String(key) => mask for (key, mask) in KDEFlightPlanning.load_cover_masks(
+        GLI_CLASS_PATH; nrows=NROWS, ncols=NCOLS, class_codes=class_codes, flip_y=flip_y)
+)
 if isnothing(cover_masks)
-    @warn "No GLI_CLASS_PATH supplied; line-band CR denominators will use full band cells."
+    @warn "No GLI class raster supplied; skipping C3/C4, which require exact cover masks."
 else
+    cover_masks, _support_mode, _grid_size = KDEFlightPlanning._line_scan_cover_support(
+        count_grids; cover_masks=cover_masks)
     println("Loaded GLI class masks for line-band CR denominators:")
     for (cover_key, cover_label) in zip(COVER_KEYS, CHAR_COVERS)
         println("  $cover_label: $(count(cover_masks[cover_key])) cells")
@@ -141,15 +114,16 @@ for all cover masks combined (or per cover if per_cover=true).
 function band_cr_per_cover(count_grids, row_center, half_band=20;
                             ret="ground", mission_key="density", kernel="E",
                             cover_masks=nothing)
-    r0 = max(1, row_center - half_band + 1)
-    r1 = min(NROWS, row_center + half_band + 1)
+    isnothing(cover_masks) && error("Line-band coverage requires exact cover masks")
+    r0 = max(1, row_center - half_band)
+    r1 = min(NROWS, row_center + half_band)
     rows = NamedTuple[]
     for (cover_key, cover_label) in zip(COVER_KEYS, CHAR_COVERS)
         k = (ret, cover_key, mission_key, kernel)
         mat = get(count_grids, k, nothing)
         isnothing(mat) && continue
         band = mat[r0:r1, :]
-        mask = isnothing(cover_masks) ? trues(size(band)) : cover_masks[cover_key][r0:r1, :]
+        mask = cover_masks[cover_key][r0:r1, :]
         n_total   = count(mask)
         n_covered = count((band .> 0) .& mask)
         push!(rows, (
@@ -165,15 +139,16 @@ end
 function band_counts_nonzero(count_grids, row_center, half_band=20;
                               ret="ground", mission_key="density", kernel="E",
                               cover_masks=nothing)
-    r0 = max(1, row_center - half_band + 1)
-    r1 = min(NROWS, row_center + half_band + 1)
+    isnothing(cover_masks) && error("Line-band return distributions require exact cover masks")
+    r0 = max(1, row_center - half_band)
+    r1 = min(NROWS, row_center + half_band)
     all_vals = Int[]
     for cover_key in COVER_KEYS
         k = (ret, cover_key, mission_key, kernel)
         mat = get(count_grids, k, nothing)
         isnothing(mat) && continue
         band = mat[r0:r1, :]
-        mask = isnothing(cover_masks) ? trues(size(band)) : cover_masks[cover_key][r0:r1, :]
+        mask = cover_masks[cover_key][r0:r1, :]
         append!(all_vals, filter(x -> x > 0, vec(band[mask])))
     end
     return all_vals
@@ -184,14 +159,8 @@ end
 # ─────────────────────────────────────────────────────────────
 println("\n=== Figure C1: char_return_comparison ===")
 
-# Filter stats_df to primary 3 missions
-primary_stats = filter(r ->
-    (r.Mission ∈ ["Const. 2 m/s", "KDE-guided (Epanechnikov)", "Const. 8 m/s"]) &&
-    (r.Kernel ∈ ["——", "E"]) &&
-    ((r.Mission == "KDE-guided (Epanechnikov)" && r.Kernel == "E") ||
-     (r.Mission ∈ ["Const. 2 m/s", "Const. 8 m/s"] && r.Kernel == "——")),
-    stats_df
-)
+# Map source CSV labels to the primary mission IDs before selecting plot data.
+primary_stats = KDEFlightPlanning.characterization_stats(stats_df)
 
 fig_c1 = Figure(size=(1200, 480), backgroundcolor=FIG_BG)
 Label(fig_c1[0, 1:3],
@@ -213,7 +182,8 @@ for (ci, cover) in enumerate(CHAR_COVERS)
     for (mi, (mission_key, kernel, display_label, color_hex)) in enumerate(CHAR_MISSIONS)
         col = parse(Makie.Colors.Colorant, color_hex)
         for (ri, ret) in enumerate(["Ground", "All"])
-            sub = filter(r -> r.Cover == cover && r.Mission == display_label && r.Return == ret,
+            sub = filter(r -> r.Cover == cover && r.mission_key == Symbol(mission_key) &&
+                              r.kernel_key == Symbol(kernel) && r.Return == ret,
                          primary_stats)
             isempty(sub) && continue
             cr = sub[1, :CR]
@@ -243,15 +213,7 @@ println("  Written: ", join(basename.(paths_c1), ", "))
 # ─────────────────────────────────────────────────────────────
 println("\n=== Figure C2: char_saturation_scatter ===")
 
-scatter_df = filter(r ->
-    r.Mission ∈ ["Const. 2 m/s", "KDE-guided (Epanechnikov)", "Const. 8 m/s"] &&
-    r.Return == "Ground" &&
-    r.Kernel ∈ ["——", "E"] &&
-    ((r.Mission == "KDE-guided (Epanechnikov)" && r.Kernel == "E") ||
-     (r.Mission ∈ ["Const. 2 m/s", "Const. 8 m/s"] && r.Kernel == "——")),
-    stats_df
-)
-scatter_df[!, :cond_mean] = scatter_df.Mean ./ scatter_df.CR
+scatter_df = filter(r -> r.Return == "Ground", primary_stats)
 
 fig_c2 = Figure(size=(1100, 420), backgroundcolor=FIG_BG)
 Label(fig_c2[0, 1:3],
@@ -274,12 +236,12 @@ for (ci, cover) in enumerate(CHAR_COVERS)
 
     sub = filter(r -> r.Cover == cover, scatter_df)
     for row in eachrow(sub)
-        mission = row.Mission
-        col_idx = findfirst(x -> x[3] == mission, CHAR_MISSIONS)
+        col_idx = findfirst(x -> Symbol(x[1]) == row.mission_key &&
+                                Symbol(x[2]) == row.kernel_key, CHAR_MISSIONS)
         isnothing(col_idx) && continue
         col = parse(Makie.Colors.Colorant, CHAR_MISSIONS[col_idx][4])
         scatter!(ax, [row.cond_mean], [row.CR]; color=col, markersize=14, strokewidth=0.5, strokecolor=:white)
-        text!(ax, "$(row.Mission[1:min(9,length(row.Mission))])";
+        text!(ax, "$(first(row.display_label, 9))";
               position=(row.cond_mean, row.CR),
               offset=(4, 2), fontsize=7, color=col)
     end
@@ -450,17 +412,25 @@ end
 # ─────────────────────────────────────────────────────────────
 # Figure C3: char_line2_return_dist (Line 2, row 40)
 # ─────────────────────────────────────────────────────────────
-println("\n=== Figure C3: char_line2_return_dist ===")
-# Line 2: row_center = 40 (from actual_trajectory_line_scan_summary.csv)
-paths_c3 = make_line_dist_fig(2, 40, "char_line2_return_dist"; omit_coniferous=false)
+paths_c3 = String[]
+paths_c4 = String[]
+if !isnothing(cover_masks)
+    waypoint_path = require_ground_truth(_GT, :waypoints_xy, "E_density_aware__waypoints_xy.csv")
+    planned_lines = derive_planned_lines(waypoint_path)
+    cover_geotransform = read_band(GLI_CLASS_PATH)[2]
+    grid_geotransform = KDEFlightPlanning._line_scan_geotransform(
+        (NROWS, NCOLS); geotransform=cover_geotransform)
+    function row_for_line(number)
+        rows = filter(row -> row.line_number == number, planned_lines)
+        nrow(rows) == 1 || error("Expected exactly one planned line numbered $number")
+        return KDEFlightPlanning._line_scan_row(only(rows.y_center), grid_geotransform)
+    end
+    println("\n=== Figure C3: char_line2_return_dist ===")
+    append!(paths_c3, make_line_dist_fig(2, row_for_line(2), "char_line2_return_dist"; omit_coniferous=false))
 
-# ─────────────────────────────────────────────────────────────
-# Figure C4: char_line4_return_dist (Line 4, row 120)
-# Coniferous is retained when GLI class masks are supplied.
-# ─────────────────────────────────────────────────────────────
-println("\n=== Figure C4: char_line4_return_dist ===")
-# Line 4: row_center = 120 (from actual_trajectory_line_scan_summary.csv)
-paths_c4 = make_line_dist_fig(4, 120, "char_line4_return_dist"; omit_coniferous=false)
+    println("\n=== Figure C4: char_line4_return_dist ===")
+    append!(paths_c4, make_line_dist_fig(4, row_for_line(4), "char_line4_return_dist"; omit_coniferous=false))
+end
 
 # ─────────────────────────────────────────────────────────────
 # Done
@@ -471,3 +441,4 @@ for p in all_paths
     sz = round(stat(p).size / 1024; digits=1)
     println("  $(basename(p))  ($(sz) kB)")
 end
+

@@ -24,7 +24,7 @@ Usage
 
   CONFIG.toml RunInputs TOML config. Data discovery is driven by it:
                 [paths].counts_json        — count grids
-                [paths].gli_class_raster   — optional 263×324 GLI class raster
+                [paths].gli_class_raster   — exact 263×324 GLI cover-class raster
                 [paths.waypoints].Ed       — E density-aware waypoints CSV
                 [paths.trajectory].{const2,missionE,const8} — flown-track CSVs
   OUTPUT_DIR  (optional) where to write CSVs; default = <config outdir>/trajectory
@@ -42,7 +42,6 @@ Pkg.activate(joinpath(@__DIR__, ".."))
 
 using KDEFlightPlanning
 using CSV, DataFrames, Statistics, Printf
-using FileIO, ImageIO, ColorTypes
 
 include(joinpath(@__DIR__, "ground_truth.jl"))
 
@@ -70,39 +69,14 @@ function _trajectory_path(gt::GroundTruth, keys::Vector{Symbol}, human::Abstract
           "  These large flown-track CSVs are intentionally NOT bundled.")
 end
 
-function _class_value(px)
-    if px isa Colorant
-        return round(Int, Float64(red(px)) * 255)
-    elseif px isa Number
-        x = Float64(px)
-        return round(Int, x <= 1 ? x * 255 : x)
-    else
-        error("Unsupported GLI pixel type: $(typeof(px))")
-    end
-end
-
 function load_gli_cover_masks(path::AbstractString)
-    isempty(path) && return nothing
-    isfile(path) || error("GLI_CLASS_PATH does not exist: $path")
-    img = FileIO.load(path)
-    expected_size = (SCAN_NROWS, SCAN_NCOLS)
-    size(img) == expected_size ||
-        error("GLI class raster has size $(size(img)); expected $(expected_size)")
-
-    classes = Matrix{Int}(undef, size(img)...)
-    for I in CartesianIndices(img)
-        classes[I] = _class_value(img[I])
-    end
-
-    # The attached GLI image is in display/image row order; decoded count grids
-    # use row 1 as geographic north. Flip rows so masks align with count grids.
-    classes = reverse(classes; dims = 1)
-
-    return Dict(
-        "decid" => classes .== 0,
-        "conif" => classes .== 1,
-        "field" => classes .== 2,
-    )
+    isempty(path) && error("Exact GLI cover masks are required for spatial line-scan CR. " *
+                          "Set [paths].gli_class_raster; return-inferred masks are not used.")
+    codes = _GT.inputs === nothing ? Dict(:field=>2, :decid=>0, :conif=>1) : _GT.inputs.gli_class_codes
+    flip_y = _GT.inputs === nothing ? false : _GT.inputs.cover_mask_flip_y
+    masks = load_cover_masks(path; nrows=SCAN_NROWS, ncols=SCAN_NCOLS,
+                             class_codes=codes, flip_y=flip_y)
+    return Dict(string(key)=>mask for (key, mask) in masks)
 end
 
 # ---------------------------------------------------------------------------
@@ -186,19 +160,17 @@ count_grids = load_count_grids(counts_json)
 println("  Loaded $(length(count_grids)) count-grid entries")
 
 cover_masks = load_gli_cover_masks(GLI_CLASS_PATH)
-if isnothing(cover_masks)
-    @warn "No GLI_CLASS_PATH supplied; line-scan CR denominators will use return-inferred support."
-else
-    println("  Loaded GLI class masks for fixed line-scan CR denominators:")
-    for cover in COVER_KEYS
-        println("    $(COVER_LABELS[cover]): $(count(cover_masks[cover])) cells")
-    end
+cover_geotransform = read_band(GLI_CLASS_PATH)[2]
+println("  Loaded GLI class masks for fixed line-scan CR denominators:")
+for cover in COVER_KEYS
+    println("    $(COVER_LABELS[cover]): $(count(cover_masks[cover])) cells")
 end
 
 scan_df, cover_df, wide_df, profile_df = line_scan_cover_metrics(
     count_grids, processed, planned_lines, MISSIONS;
     half_band_rows = 20,
     cover_masks = cover_masks,
+    geotransform = cover_geotransform,
 )
 
 # Merge best_forest ranking into scan_df
@@ -233,6 +205,7 @@ ext2_df, cover2_df, profile2_df = single_line_cover_metrics(
     count_grids, processed, planned_lines, MISSIONS, 2;
     half_band_rows = 20,
     cover_masks = cover_masks,
+    geotransform = cover_geotransform,
 )
 
 CSV.write(joinpath(OUT_DIR, "line2_actual_overlap_extents.csv"),        ext2_df)
@@ -295,3 +268,4 @@ if !isempty(const2_row)
             raw_savings, raw_savings / t_const2_raw * 100)
     end
 end
+

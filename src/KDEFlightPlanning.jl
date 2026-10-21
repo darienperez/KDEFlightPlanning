@@ -201,6 +201,7 @@ include("along_track.jl") # along_track_cr, split_at_gaps,
                            # multi_mission_along_track, export_along_track_csv
 include("geotiff_io.jl")  # GeoRasterStack, load_rgb_geotiff, read_band,
                            # raster_extents, write_single_band_geotiff
+include("cover_masks.jl") # load_cover_masks: exact categorical GLI support
 include("lidar_counts.jl") # LASMission, crop_las, bin_to_count_grid,
                             # build_count_grids, percent_density_table,
                             # cover_stats_table, write_count_grids_json,
@@ -217,6 +218,7 @@ export RunInputs, load_inputs, inputs_template, MissingInputError
 # --- GeoTIFF I/O (geotiff_io.jl) ---
 export GeoRasterStack, load_rgb_geotiff, read_band, raster_extents
 export write_single_band_geotiff, axes_from_georasterstack
+export load_cover_masks
 
 # --- LiDAR counts (lidar_counts.jl) ---
 export LASMission, STANDARD_MISSION_PLAN, DEFAULT_PD_BINS
@@ -388,3 +390,4 @@ export multi_mission_along_track, export_along_track_csv
 export along_track_weakness_note
 
 end # module KDEFlightPlanning
+

@@ -1,8 +1,8 @@
 """
     test/runtests.jl — Unit tests for KDEFlightPlanning
 
-All tests use synthetic `RasterGrid` instances; no GeoTIFFs, Colors.jl, or
-ImageMorphology.jl are required.
+Core tests use synthetic `RasterGrid` instances. Exact-mask I/O tests write
+small synthetic GeoTIFF fixtures; no original orthomosaics or LiDAR are needed.
 
 Test groups
 -----------
@@ -33,6 +33,12 @@ using Colors: RGB, red, green, blue
 using MultivariateStats
 using Distances
 using JSON
+
+include("bootstrap_masks.jl")
+include("characterization_data.jl")
+include("cover_masks.jl")
+include("count_grid_layout.jl")
+include("line_geometry.jl")
 
 # ===========================================================================
 # 1. RasterGrid construction and make_grid
@@ -1085,7 +1091,9 @@ if isfile(_COUNTS_JSON)
     @testset "bootstrap_cr_table: real data integration" begin
         # Use a small nboot for speed in tests
         df = bootstrap_cr_table(_COUNTS_JSON;
-                                nboot=100, block_frac=0.03, seed=42)
+                                nboot=100, block_frac=0.03, seed=42,
+                                allow_approximate_masks=true)
+        @test all(df.support_mode .== "approximate_positive_union")
 
         @test df isa DataFrame
         @test nrow(df) == 36  # 3 covers × 2 returns × (4 missions: 2KA×2kernels + 2const) = 36
@@ -1116,7 +1124,9 @@ if isfile(_COUNTS_JSON)
     @testset "bootstrap_cr_difference_table: real data integration" begin
         comps = default_narrative_comparisons()
         df = bootstrap_cr_difference_table(_COUNTS_JSON, comps;
-                                           nboot=100, block_frac=0.03, seed=42)
+                                           nboot=100, block_frac=0.03, seed=42,
+                                           allow_approximate_masks=true)
+        @test all(df.support_mode .== "approximate_positive_union")
 
         @test df isa DataFrame
         @test nrow(df) == length(comps)
@@ -3072,3 +3082,4 @@ end
 @testset "DEFAULT_REPORT_FORMATS is PNG only" begin
     @test KDEFlightPlanning.DEFAULT_REPORT_FORMATS == ["png"]
 end
+
